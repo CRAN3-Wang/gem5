@@ -119,6 +119,10 @@ class X86Linux64 : public X86Linux, public OpenFlagTable<X86Linux64>
         int64_t unused0[3];
     };
 
+    // x86-64 newfstatat uses the same native layout as stat/fstat, not the
+    // generic Linux::tgt_stat layout inherited from Linux.
+    using tgt_stat = tgt_stat64;
+
     struct tgt_fsid
     {
         long val[2];
