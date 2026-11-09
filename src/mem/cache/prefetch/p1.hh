@@ -44,7 +44,7 @@ class P1Prefetcher : public TPCComponent {
     EventFunctionWrapper wake;
     struct Stats : statistics::Group {
         statistics::Scalar samples, trained, mismatches, returns, overflow,
-            canceled, unsupported, predictions, demandValues, residentValues, deferredValues;
+            canceled, unsupported, predictions, demandValues, residentValues, deferredValues, pendingValues;
         Stats(statistics::Group *);
     } p1Stats;
     bool active(const PointerStream &) const;

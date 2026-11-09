@@ -36,6 +36,9 @@ class P1ProducerFixture : public TPCComponent {
         submitCandidates(cap, {{req->getPaddr(), 1}});
     }
   public:
+    unsigned multiplier(const PointerStream &s) const {
+        return pointerDistanceMultiplier(s);
+    }
     explicit P1ProducerFixture(const P1ProducerFixtureParams &);
 };
 }

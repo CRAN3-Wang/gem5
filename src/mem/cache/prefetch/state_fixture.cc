@@ -2,6 +2,7 @@
 #include "mem/cache/prefetch/state_fixture.hh"
 #include "params/TPCStateFixture.hh"
 #include "mem/cache/prefetch/p1.hh"
+#include "mem/cache/prefetch/p1_fixture.hh"
 #include "params/TPCFixtureComponent.hh"
 #include "sim/core.hh"
 namespace gem5::prefetch {
@@ -9,7 +10,7 @@ FixtureComponent::FixtureComponent(const TPCFixtureComponentParams &p)
     : TPCComponent(p), recognized(p.recognize) {}
 StateFixture::StateFixture(const TPCStateFixtureParams &p)
     : SimObject(p), cache(p.cache), dataCache(p.data_cache),
-      controller(p.controller), component(p.component) {}
+      controller(p.controller), component(p.component), producerComponent(p.producer) {}
 void StateFixture::run() {
     unsigned block = cache->getBlockSize();
     auto fill = [&](Addr address, bool secure = false) {
@@ -149,6 +150,8 @@ void StateFixture::runP1(const InstructionSource &source) {
     controller->cacheAccess(access); // actual T2 ownership plus explicit handoff
     panic_if(p1->streams.size()!=1, "T2 ownership starved P1 handoff");
     auto stream=p1->streams[0];
+    auto *t2=dynamic_cast<P1ProducerFixture *>(producerComponent);
+    panic_if(!t2 || t2->multiplier(stream)!=1, "Untrained stream distance multiplier");
     auto dependent=source; dependent.offset++;
     auto producer = [&](uint64_t seq, Addr value, unsigned reg) {
         RetiredOperation e;
@@ -170,6 +173,7 @@ void StateFixture::runP1(const InstructionSource &source) {
         producer(10+i*2, 0x600000+i*64, 10);
         consumer(11+i*2, 0x600008+i*64, 10);
         panic_if(p1->isPointerStream(stream)!=(i==3), "Four observations required");
+        panic_if(t2->multiplier(stream)!=(i==3 ? 2u : 1u), "Pointer distance promotion");
     }
     panic_if(cache->readInstructionState(dependent,2)!=2 ||
         cache->readInstructionState(dependent,1)!=0 ||
@@ -179,6 +183,7 @@ void StateFixture::runP1(const InstructionSource &source) {
     consumer(32,0x700008,10); consumer(33,0x800008,11);
     panic_if(p1->relations[0].confidence.delta!=8 ||
              p1->relations[0].confidence.samples!=4, "Dynamic producer confusion");
+    panic_if(t2->multiplier(stream)!=2, "Repeated recognition multiplied distance again");
     // Source2 candidates must not be submitted at completion/packet arrival.
     panic_if(cache->accounting->value("generated",2), "P1 ignored compute readiness");
     // Overwrite kills taint even if the new value numerically resembles a pointer.
@@ -190,8 +195,10 @@ void StateFixture::runP1(const InstructionSource &source) {
     producer(40,0x900000,10); consumer(41,0x8ffff8,10);
     panic_if(p1->isPointerStream(stream) || p1->relations[0].confidence.samples!=1,
              "Offset mismatch did not reset confidence");
+    panic_if(t2->multiplier(stream)!=1, "Mismatch did not reset multiplier");
     for(unsigned i=0;i<3;++i) { producer(42+i*2,0x900000,10); consumer(43+i*2,0x8ffff8,10); }
     panic_if(!p1->isPointerStream(stream), "Negative offset failed to retrain");
+    panic_if(t2->multiplier(stream)!=2, "Retraining did not restore multiplier");
     // Two independent exact pointer offsets in one line, with a modeled fill.
     p1->pending.clear();
     for(unsigned i=0;i<2;++i) {

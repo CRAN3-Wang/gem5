@@ -30,7 +30,8 @@ if "--directed" in sys.argv:
     controller = system.cpu.dcache.prefetcher
     system.fixture = TPCStateFixture(cache=system.cpu.icache, data_cache=system.cpu.dcache,
                                     controller=controller,
-                                    component=controller.components[1])
+                                    component=controller.components[1],
+                                    producer=controller.components[0])
 root = Root(full_system=False, system=system)
 m5.instantiate()
 if "--directed" in sys.argv:

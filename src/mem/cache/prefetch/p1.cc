@@ -13,7 +13,8 @@ P1Prefetcher::Stats::Stats(statistics::Group *p) : statistics::Group(p, "p1"),
     ADD_STAT(predictions, statistics::units::Count::get(), "Dependent candidates submitted"),
     ADD_STAT(demandValues, statistics::units::Count::get(), "Retired producer values"),
     ADD_STAT(residentValues, statistics::units::Count::get(), "Resident producer array reads"),
-    ADD_STAT(deferredValues, statistics::units::Count::get(), "Producer reads waiting for fill") {}
+    ADD_STAT(deferredValues, statistics::units::Count::get(), "Producer reads waiting for fill"),
+    ADD_STAT(pendingValues, statistics::units::Count::get(), "Subscriptions to an existing L1 MSHR") {}
 P1Prefetcher::P1Prefetcher(const P1PrefetcherParams &p)
     : TPCComponent(p), threshold(p.consistent_observations),
       streamLimit(p.stream_entries), pendingLimit(p.pending_values),
@@ -185,7 +186,11 @@ void P1Prefetcher::onProducerRead(const ProducerRead &read) {
     std::vector<uint8_t> bytes;
     Tick ready = 0;
     bool resident = pointerBytes(req->getPaddr(), req->isSecure(), bytes, ready);
+    bool inFlight = cacheView(1).pending(req->getPaddr(), req->isSecure());
     if (resident) ++p1Stats.residentValues; else ++p1Stats.deferredValues;
+    if (!resident && inFlight) ++p1Stats.pendingValues;
+    if (trace) inform("P1_SUBSCRIBE producer=%#x va=%#x pa=%#x resident=%d pending=%d ready=%llu tick=%llu",
+        read.stream.pc, req->getVaddr(), req->getPaddr(), resident, inFlight, ready, curTick());
     Addr value = 0;
     if (resident)
         for (unsigned j = 0; j < 8; ++j)
@@ -207,6 +212,9 @@ void P1Prefetcher::consume(const FillEvent &e) {
         p.returned = true;
         p.ready = std::max(curTick(), e.ready) + clockPeriod() * computationLatency;
         ++p1Stats.returns;
+        if (trace) inform("P1_RETURN pa=%#x pointer=%#x origin_source=%d fill_ready=%llu ready=%llu tick=%llu",
+            p.physical, p.value, e.origin ? e.origin->source : 0,
+            e.ready, p.ready, curTick());
     }
     scheduleWake();
 }

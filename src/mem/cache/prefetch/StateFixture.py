@@ -11,6 +11,7 @@ class TPCStateFixture(SimObject):
     data_cache = Param.BaseCache(NULL, "Optional P1 resident-value cache")
     controller = Param.TPCController("Bound controller")
     component = Param.TPCComponent("Component under test")
+    producer = Param.TPCComponent(NULL, "Optional test-only T2 stimulus")
 class TPCFixtureComponent(TPCComponent):
     type = "TPCFixtureComponent"
     cxx_class = "gem5::prefetch::FixtureComponent"

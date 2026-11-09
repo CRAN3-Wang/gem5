@@ -26,6 +26,7 @@ class StateFixture : public SimObject {
     BaseCache *dataCache;
     TPCController *controller;
     TPCComponent *component;
+    TPCComponent *producerComponent;
   public:
     explicit StateFixture(const TPCStateFixtureParams &);
     void run();
