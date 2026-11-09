@@ -45,6 +45,11 @@ class TPCController(BasePrefetcher):
             if cpu is None or not hasattr(cpu, "p1_controller"):
                 raise ValueError("P1 requires an O3 CPU-owned instruction cache")
             cpu.p1_controller = self
+            # T2 can translate its exact producer Request asynchronously, then
+            # hand it to P1 and submit the PA with its saved T2 capability.
+            for component in self.components:
+                if int(component.accounting_source) == 1 and cpu.mmu not in component._mmus:
+                    component.registerMMU(cpu.mmu)
 
     def regProbeListeners(self):
         if self._instruction_cache is not None:
