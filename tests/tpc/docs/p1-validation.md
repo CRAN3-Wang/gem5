@@ -38,3 +38,20 @@ readiness timestamps and negative controls, and writes `build/p1-validation/repo
 All paths in this record are relative to the gem5 repository unless absolute.
 Only gem5 is to be committed; parent source edits authored during the initial
 scope were restored after the user clarified gem5-only delivery.
+
+## GCC 16 pipeline initialization blocker
+
+The first linked binary crashed even with the no-prefetch profile, in O3
+Decode/Rename/Commit with an uninitialized pipeline record count. Disassembly
+showed that GCC 16 discarded the `memset` before placement construction in
+`TimeBuffer`. `tests/tpc/timebuf_init.cc` reproduces the issue with the same
+scalar-count plus intrusive-pointer-array shape: compiled at `-O3 -DNDEBUG`,
+it exits 1 with the original header and 0 after the fix. The fix value-initializes
+records inside their lifetime, both initially and when recycling a slot.
+
+Reproduce from gem5:
+
+```sh
+g++ -std=c++17 -O3 -DNDEBUG -Isrc tests/tpc/timebuf_init.cc -o build/p1-validation/timebuf-init
+build/p1-validation/timebuf-init
+```

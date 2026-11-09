@@ -30,7 +30,7 @@
 #define __BASE_TIMEBUF_HH__
 
 #include <cassert>
-#include <cstring>
+#include <new>
 #include <vector>
 
 namespace gem5
@@ -145,8 +145,9 @@ class TimeBuffer
         char *ptr = data;
         for (unsigned i = 0; i < size; i++) {
             index[i] = ptr;
-            std::memset(ptr, 0, sizeof(T));
-            new (ptr) T;
+            // Initialize scalars within their lifetime. Pre-construction
+            // memset can be removed by lifetime dead-store elimination.
+            new (ptr) T();
             ptr += sizeof(T);
         }
 
@@ -185,8 +186,7 @@ class TimeBuffer
         if (ptr >= (int)size)
             ptr -= size;
         (reinterpret_cast<T *>(index[ptr]))->~T();
-        std::memset(index[ptr], 0, sizeof(T));
-        new (index[ptr]) T;
+        new (index[ptr]) T();
     }
 
   protected:
