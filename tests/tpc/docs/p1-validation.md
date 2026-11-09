@@ -63,3 +63,64 @@ fix. The guest now uses bounded, aligned static arrays (up to 65536 elements)
 so the P1 experiment does not depend on that allocator path. This does not
 claim to fix general host-libc compatibility in gem5 SE. The diagnostic
 no-prefetch output is retained in `build/p1-validation/baseline-zero.log`.
+
+## Real simulator validation (2026-11-09)
+
+Both builds linked successfully with Python 3.11.18, GCC 16,
+`PROTOCOL=None USE_SYSTEMC=0`. The saved fixture binary is
+`build/p1-validation/gem5-p1-fixture.fast` (SHA256
+`c2637d8fd0f47e4ca17bce397927a525f5c34aaea49dc706e99d96ff2267b12b`).
+The normal, fixture-free `build/X86/gem5.fast` SHA256 is
+`3f0dfd4a6efc17dec9902025a72bff1da3e952a823970ea23d7307eb00792250`.
+The final executable-source revision is `7ff5f09f63`; guest/driver revision is
+`47aac84784`. Later documentation commits do not alter these binaries.
+Production registration confirms P1 exists and both test fixtures and real T2
+are absent. Build logs are under `build/p1-validation/build-*.log`.
+
+The real directed fixture and all seven guest modes passed:
+
+| Mode | P1 predictions | Accepted | Timely useful |
+|---|---:|---:|---:|
+| positive (+8) | 32446 | 16079 | 16079 |
+| negative (-8) | 32444 | 16078 | 16078 |
+| zero | 32446 | 16079 | 16079 |
+| varying | 0 | 0 | 0 |
+| independent overwrite | 0 | 0 | 0 |
+| split demand | 30438 | 14071 | 14071 |
+| store forwarded | 16367 | 0 | 0 |
+
+Every guest checksum matched native execution. The driver checked actual load
+PCs, every predicted pointer-plus-signed-offset address, submission no earlier
+than modeled readiness, buffered completion for split/forwarded modes, and
+accepted/outcome conservation. Forwarded mode proves completion/training and
+candidate generation, **not** useful accepted prefetches: those demand-stage
+candidates reach a line already being accessed.
+
+The positive trace records 14165 resident subscriptions, 1963 deferred
+subscriptions (four already in an MSHR), and 1960 delivered pointer values.
+Source-1 producer-prefetch returns are present. These are real simulator paths
+using an explicitly test-only producer, not only synthetic fill injections.
+The full report with artifact hashes is `build/p1-validation/report.json`.
+Reproduce using the saved fixture binary after building production:
+
+```sh
+build/p1-venv/bin/python tests/tpc/validate_p1.py \
+  --gem5 build/p1-validation/gem5-p1-fixture.fast \
+  --output build/p1-rerun
+```
+
+This is the implementation author's validation. Independent simulator validation
+was handed to the parent thread and is pending separately; its owned report is
+`docs/p1-independent-validation.md`. No full TP/TPC or workload speedup claim is
+made while Member B's real T2 is absent.
+
+The normal production binary also passed all seven original parent-worker
+regression scenarios: C1 dense, sparse, cross-line and instruction eviction;
+no-prefetch and C1 with 2M warmup/5M measurement; and naive-multi. Checks covered
+checksums where measured to completion, original configuration attachments,
+C1 classifications/generation changes, useful C1 activity and lifecycle
+conservation for all sources. Parent runners/sources were unchanged. Local
+artifacts: `build/p1-own-regressions/{run.log,regressions.json,regression-*/}`.
+The copied orchestration script accepts both `t` and `T` from `nm` for `visit`
+(the normal C guest's function is local); this is a test-script correction,
+not an implementation or parent-source change.
