@@ -8,10 +8,19 @@ class TPCStateFixture(SimObject):
     cxx_header = "mem/cache/prefetch/state_fixture.hh"
     cxx_exports = [PyBindMethod("run")]
     cache = Param.BaseCache("I-cache under test")
+    data_cache = Param.BaseCache(NULL, "Optional P1 resident-value cache")
     controller = Param.TPCController("Bound controller")
     component = Param.TPCComponent("Component under test")
+    producer = Param.TPCComponent(NULL, "Optional test-only T2 stimulus")
 class TPCFixtureComponent(TPCComponent):
     type = "TPCFixtureComponent"
     cxx_class = "gem5::prefetch::FixtureComponent"
     cxx_header = "mem/cache/prefetch/state_fixture.hh"
     recognize = Param.Bool(True, "Recognize without generating candidates")
+
+class P1ProducerFixture(TPCComponent):
+    type = "P1ProducerFixture"
+    cxx_class = "gem5::prefetch::P1ProducerFixture"
+    cxx_header = "mem/cache/prefetch/p1_fixture.hh"
+    accounting_source = 1
+    producer_pc = Param.Addr("Exact fixture guest producer load PC")

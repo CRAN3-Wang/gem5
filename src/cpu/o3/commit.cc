@@ -40,6 +40,8 @@
  */
 
 #include "cpu/o3/commit.hh"
+#include "mem/cache/prefetch/framework.hh"
+#include "params/BaseO3CPU.hh"
 
 #include <algorithm>
 #include <set>
@@ -450,6 +452,11 @@ Commit::numROBFreeEntries(ThreadID tid)
 void
 Commit::generateTrapEvent(ThreadID tid, Fault inst_fault)
 {
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(cpu->params()).p1_controller) {
+        prefetch::RetiredOperation reset;
+        reset.reset = true;
+        observer->retiredOperation(reset);
+    }
     DPRINTF(Commit, "Generating trap event for [tid:%i]\n", tid);
 
     EventFunctionWrapper *trap = new EventFunctionWrapper(
@@ -484,6 +491,12 @@ Commit::generateTCEvent(ThreadID tid)
 void
 Commit::squashAll(ThreadID tid)
 {
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(cpu->params()).p1_controller) {
+        prefetch::RetiredOperation reset;
+        reset.reset = true;
+        observer->retiredOperation(reset);
+    }
+
     // If we want to include the squashing instruction in the squash,
     // then use one older sequence number.
     // Hopefully this doesn't mess things up.  Basically I want to squash
@@ -811,6 +824,11 @@ Commit::commit()
             // number as the youngest instruction in the ROB.
             youngestSeqNum[tid] = squashed_inst;
 
+            if (auto *observer = static_cast<const BaseO3CPUParams &>(cpu->params()).p1_controller) {
+                prefetch::RetiredOperation reset;
+                reset.reset = true;
+                observer->retiredOperation(reset);
+            }
             rob->squash(squashed_inst, tid);
             changedROBNumEntries[tid] = true;
 
@@ -1234,6 +1252,38 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         return false;
     }
 
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(cpu->params()).p1_controller) {
+        prefetch::RetiredOperation event;
+        event.reset = head_inst->staticInst->isSyscall() ||
+                      head_inst->inHtmTransactionalState();
+        event.sequence = head_inst->seqNum;
+        event.context = head_inst->tcBase()->contextId();
+        event.pc = head_inst->pcState().instAddr();
+        event.microPC = head_inst->pcState().microPC();
+        event.source = head_inst->instructionSource;
+        event.request = head_inst->p1Request;
+        event.address = head_inst->effAddr;
+        event.value = head_inst->p1Value;
+        event.width = head_inst->p1Width;
+        event.buffered = head_inst->p1Buffered;
+        event.load = head_inst->staticInst->p1Load() && bool(event.request);
+        event.propagate = !head_inst->isMemRef() && !head_inst->isControl();
+        auto *isa = head_inst->tcBase()->getIsaPtr();
+        for (int i = 0; i < head_inst->numSrcRegs(); ++i) {
+            auto r = head_inst->srcRegIdx(i).flatten(*isa);
+            if (r.classValue() == IntRegClass) {
+                if (head_inst->staticInst->p1DataSource(i))
+                    event.sources.push_back(r.index());
+                if (head_inst->staticInst->p1AddressSource(i))
+                    event.addressSources.push_back(r.index());
+            }
+        }
+        for (int i = 0; i < head_inst->numDestRegs(); ++i) {
+            auto r = head_inst->flattenedDestIdx(i);
+            if (r.classValue() == IntRegClass) event.destinations.push_back(r.index());
+        }
+        observer->retiredOperation(event);
+    }
     updateComInstStats(head_inst);
 
     DPRINTF(Commit,

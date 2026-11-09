@@ -23,11 +23,14 @@ class FixtureComponent : public TPCComponent {
 };
 class StateFixture : public SimObject {
     BaseCache *cache;
+    BaseCache *dataCache;
     TPCController *controller;
     TPCComponent *component;
+    TPCComponent *producerComponent;
   public:
     explicit StateFixture(const TPCStateFixtureParams &);
     void run();
+    void runP1(const InstructionSource &);
 };
 }}
 #endif

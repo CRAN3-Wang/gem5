@@ -41,6 +41,7 @@
  */
 
 #include "cpu/o3/cpu.hh"
+#include "mem/cache/prefetch/framework.hh"
 
 #include "cpu/activity.hh"
 #include "cpu/checker/cpu.hh"
@@ -614,6 +615,11 @@ CPU::insertThread(ThreadID tid)
 void
 CPU::removeThread(ThreadID tid)
 {
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(params()).p1_controller) {
+        prefetch::RetiredOperation reset;
+        reset.reset = true;
+        observer->retiredOperation(reset);
+    }
     DPRINTF(O3CPU,"[tid:%i] Removing thread context from CPU.\n", tid);
 
     // Copy Thread Data From RegFile
@@ -865,6 +871,11 @@ CPU::drainResume()
 void
 CPU::switchOut()
 {
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(params()).p1_controller) {
+        prefetch::RetiredOperation reset;
+        reset.reset = true;
+        observer->retiredOperation(reset);
+    }
     DPRINTF(O3CPU, "Switching out\n");
     BaseCPU::switchOut();
 
@@ -879,6 +890,11 @@ CPU::switchOut()
 void
 CPU::takeOverFrom(BaseCPU *oldCPU)
 {
+    if (auto *observer = static_cast<const BaseO3CPUParams &>(params()).p1_controller) {
+        prefetch::RetiredOperation reset;
+        reset.reset = true;
+        observer->retiredOperation(reset);
+    }
     BaseCPU::takeOverFrom(oldCPU);
 
     fetch.takeOverFrom();

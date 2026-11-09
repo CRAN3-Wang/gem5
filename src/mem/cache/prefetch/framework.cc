@@ -223,4 +223,71 @@ std::vector<SubmissionResult> TPCController::submit(TPCComponent *component,
     }
     return result;
 }
+void TPCController::retiredOperation(const RetiredOperation &e) {
+    if (e.reset) {
+        // Revoke every P1 consumer before T2 cancellation callbacks can run.
+        // A callback canceling one stream must not release other ready work
+        // during a recovery that invalidates all streams.
+        for (auto *c : components)
+            if (c->source() == 2) c->onRetiredOperation(e, nullptr);
+        for (auto *c : components)
+            if (c->source() != 2) c->onRetiredOperation(e, nullptr);
+        return;
+    }
+    // T2 gets committed-load observation first, including cache-bypassing
+    // forwarding. It may register a stream here but receives no submission
+    // capability. Order does not depend on Python component vector ordering.
+    for (auto *c : components) {
+        if (c->source() != 1) continue;
+        c->stage = e.load && e.request && validSource(e.source) ?
+            TPCComponent::Stage::Retire : TPCComponent::Stage::Observe;
+        c->onRetiredOperation(e, nullptr);
+        c->stage = TPCComponent::Stage::Idle;
+    }
+    // CPU commits are an independent framework dispatch, not policy fallthrough.
+    for (auto *c : components) {
+        if (c->source() != 2) continue;
+        if (e.load && e.request && validSource(e.source)) {
+            AccessEvent access;
+            access.request = e.request;
+            SubmissionContext capability(access, c);
+            c->onRetiredOperation(e, &capability);
+        } else {
+            c->onRetiredOperation(e, nullptr);
+        }
+    }
+}
+void TPCComponent::announcePointerStream(const PointerStream &s) {
+    fatal_if(source() != 1 || !controller ||
+             (stage != Stage::Predict && stage != Stage::Retire),
+             "Only authorized T2 prediction/retirement may announce streams");
+    if (!s.version || !controller->validSource(s.source)) return;
+    for (auto *c : controller->components)
+        if (c->source() == 2) c->onPointerStream(s);
+}
+void TPCComponent::requestPointerValue(const ProducerRead &r) {
+    fatal_if(source() != 1 || !controller ||
+             (stage != Stage::Predict && stage != Stage::Idle),
+             "Producer returns require T2 prediction or a deferred T2 callback");
+    if (!controller->validSource(r.stream.source)) return;
+    for (auto *c : controller->components)
+        if (c->source() == 2) c->onProducerRead(r);
+}
+void TPCComponent::cancelPointerStream(const PointerStream &s) {
+    fatal_if(source() != 1 || !controller, "Only T2 owns stream lifetime");
+    for (auto *c : controller->components)
+        if (c->source() == 2) c->onPointerStreamCanceled(s);
+}
+unsigned TPCComponent::pointerDistanceMultiplier(const PointerStream &s) const {
+    fatal_if(source() != 1 || !controller, "Only T2 owns producer distance");
+    for (auto *c : controller->components)
+        if (c->source() == 2 && c->isPointerStream(s)) return 2;
+    return 1;
+}
+bool TPCComponent::pointerBytes(Addr a, bool secure,
+        std::vector<uint8_t> &data, Tick &ready) const {
+    fatal_if(!controller, "Missing controller");
+    return controller->caches[1]->pointerBytes(a, secure, data, ready);
+}
+
 }

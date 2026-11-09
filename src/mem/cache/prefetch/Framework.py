@@ -36,6 +36,20 @@ class TPCController(BasePrefetcher):
     def bindHierarchy(self, caches, instruction_cache=None):
         self._hierarchy = list(caches)
         self._instruction_cache = instruction_cache
+        # The existing project hierarchy hook supplies the CPU-owned I-cache.
+        # Bind retirement here so parent-project configuration need not change.
+        if instruction_cache is not None and any(
+            int(c.accounting_source) == 2 for c in self.components
+        ):
+            cpu = instruction_cache.get_parent()
+            if cpu is None or not hasattr(cpu, "p1_controller"):
+                raise ValueError("P1 requires an O3 CPU-owned instruction cache")
+            cpu.p1_controller = self
+            # T2 can translate its exact producer Request asynchronously, then
+            # hand it to P1 and submit the PA with its saved T2 capability.
+            for component in self.components:
+                if int(component.accounting_source) == 1 and cpu.mmu not in component._mmus:
+                    component.registerMMU(cpu.mmu)
 
     def regProbeListeners(self):
         if self._instruction_cache is not None:
@@ -63,3 +77,17 @@ class DivisionOfLaborController(TPCController):
     cxx_class = "gem5::prefetch::DivisionOfLaborController"
     cxx_header = "mem/cache/prefetch/c1.hh"
     mode = Param.String("TPC", "Enabled combination: C, T, TP, TPC")
+
+
+class P1Prefetcher(TPCComponent):
+    type = "P1Prefetcher"
+    cxx_class = "gem5::prefetch::P1Prefetcher"
+    cxx_header = "mem/cache/prefetch/p1.hh"
+    accounting_source = 2
+    consistent_observations = Param.Unsigned(4, "Equal offset samples")
+    relation_entries = Param.Unsigned(8, "Bounded producer/dependent relations")
+    stream_entries = Param.Unsigned(32, "T2 stream subscriptions")
+    pending_values = Param.Unsigned(32, "Bounded returned/pending value work")
+    computation_latency = Param.Cycles(1, "Pointer addition latency")
+    value_timeout = Param.Latency("1us", "Expire missing/obsolete producer work")
+    trace = Param.Bool(False, "Log dynamic pairs and dependent candidates")

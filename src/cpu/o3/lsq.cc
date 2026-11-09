@@ -40,6 +40,7 @@
  */
 
 #include "cpu/o3/lsq.hh"
+#include "mem/cache/prefetch/p1_events.hh"
 
 #include <algorithm>
 #include <list>
@@ -994,6 +995,8 @@ LSQ::SplitDataRequest::initiateTranslation()
                 _inst->pcState().instAddr(), _inst->contextId());
     _mainReq->setByteEnable(_byteEnable);
     prefetch::setInstructionSource(_mainReq, _inst->instructionSource);
+    _mainReq->setExtension(std::make_shared<prefetch::LoadIdentity>(
+        _inst->seqNum, _inst->pcState().microPC()));
 
     // Paddr is not used in _mainReq. However, we will accumulate the flags
     // from the sub requests into _mainReq by calling setFlags() in finish().
@@ -1113,6 +1116,8 @@ LSQ::LSQRequest::addReq(Addr addr, unsigned size,
                 std::move(_amo_op));
         req->setByteEnable(byte_enable);
         prefetch::setInstructionSource(req, _inst->instructionSource);
+        req->setExtension(std::make_shared<prefetch::LoadIdentity>(
+            _inst->seqNum, _inst->pcState().microPC()));
 
         /* If the request is marked as NO_ACCESS, setup a local access */
         if (_flags.isSet(Request::NO_ACCESS)) {

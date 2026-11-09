@@ -2,6 +2,7 @@
 #ifndef __MEM_PREFETCH_FRAMEWORK_HH__
 #define __MEM_PREFETCH_FRAMEWORK_HH__
 #include <array>
+#include "mem/cache/prefetch/p1_events.hh"
 #include "mem/cache/prefetch/queued.hh"
 #include "mem/cache/base.hh"
 #include "mem/cache/prefetch/framework_events.hh"
@@ -42,7 +43,7 @@ class TPCComponent : public Base {
     friend class TPCController;
     TPCController *controller = nullptr;
     const std::vector<int> observeLevels;
-    enum class Stage { Idle, Observe, Train, Recognize, Predict };
+    enum class Stage { Idle, Observe, Train, Recognize, Predict, Retire };
     Stage stage = Stage::Idle;
     void attach(TPCController *);
     // Component instances never own a cache's packet source.
@@ -59,6 +60,20 @@ class TPCComponent : public Base {
     virtual void onPredict(const AccessEvent &, const SubmissionContext &) = 0;
     virtual void onFill(const FillEvent &) {}
     virtual void onInstructionInvalidated(const InstructionSource &) {}
+    virtual void onRetiredOperation(const RetiredOperation &, const SubmissionContext *) {}
+    virtual void onPointerStream(const PointerStream &) {}
+    virtual void onProducerRead(const ProducerRead &) {}
+    virtual void onPointerStreamCanceled(const PointerStream &) {}
+    virtual bool isPointerStream(const PointerStream &) const { return false; }
+    // T2 registers streams during authorized prediction or committed-load
+    // observation. Deferred translation
+    // callbacks may hand off values for an already registered live stream.
+    void announcePointerStream(const PointerStream &);
+    void requestPointerValue(const ProducerRead &);
+    void cancelPointerStream(const PointerStream &);
+    unsigned pointerDistanceMultiplier(const PointerStream &) const;
+    bool pointerBytes(Addr, bool, std::vector<uint8_t> &, Tick &) const;
+
     int instructionState(const InstructionSource &) const;
     bool updateInstructionState(const InstructionSource &, int expected, int state);
 
@@ -117,6 +132,7 @@ class TPCController : public Base, public CacheObserver, public InstructionState
     bool updateInstructionState(const InstructionSource &s, int component, int expected, int state) {
         return instructionCache && instructionCache->updateInstructionState(s, component, expected, state);
     }
+    void retiredOperation(const RetiredOperation &);
     void cacheAccess(const AccessEvent &) final;
     void cacheFill(const FillEvent &) final;
     CacheView cacheView(int level) const;

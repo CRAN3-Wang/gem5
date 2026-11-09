@@ -66,6 +66,22 @@ class RegOpBase : public X86MicroopBase
             bool subtract=false)const ;
 
   public:
+    bool p1DataSource(int i) const override {
+        const auto *a = dynamic_cast<const FoldedSrc1Op *>(this);
+        const auto *b = dynamic_cast<const FoldedSrc2Op *>(this);
+        const auto &r = srcRegIdx(i);
+        // Full-register zeroing idioms overwrite, rather than propagate, taint.
+        if (std::string(mnemonic) == "xor" && dataSize >= 4 && a && b &&
+            a->src1 == b->src2) return false;
+        if (std::string(mnemonic) != "mov") return true;
+        // Conditional moves conservatively include both alternatives. Ordinary
+        // moves must ignore the unused old-destination/merge operand.
+        for (int j = 0; j < numSrcRegs(); ++j)
+            if (srcRegIdx(j).classValue() == CCRegClass) return true;
+        return r.classValue() == IntRegClass &&
+            ((b && r.index() == b->src2) ||
+             (dataSize < 4 && a && r.index() == a->src1));
+    }
     const uint8_t dataSize;
     const RegIndex foldOBit;
 };

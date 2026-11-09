@@ -21,6 +21,8 @@ struct FillEvent {
     Addr address;
     std::vector<uint8_t> data;
     AccountingPtr origin; // same request identity; owning provenance reference
+    bool secure = false;
+    Tick ready = 0;
 };
 class CacheObserver {
   public:
