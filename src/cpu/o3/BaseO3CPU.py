@@ -60,6 +60,8 @@ class CommitPolicy(ScopedEnum):
 
 
 class BaseO3CPU(BaseCPU):
+    p1_controller = Param.TPCController(NULL, "Optional retirement dependency observer")
+
     type = "BaseO3CPU"
     cxx_class = "gem5::o3::CPU"
     cxx_header = "cpu/o3/dyn_inst.hh"

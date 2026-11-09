@@ -85,6 +85,17 @@ class MemOp : public X86MicroopBase
  */
 class LdStOp : public InstOperands<MemOp, FoldedDataOp, AddrOp>
 {
+  public:
+    bool p1Load() const override {
+        return isLoad() && !isDataPrefetch() && addressSize == 8 &&
+               std::string(mnemonic) == "ld";
+    }
+    bool p1AddressSource(int i) const override {
+        const auto &r = srcRegIdx(i);
+        return p1Load() && r.classValue() == IntRegClass &&
+               (r.index() == base || (scale && r.index() == index));
+    }
+
   protected:
     LdStOp(ExtMachInst mach_inst, const char *mnem, const char *inst_mnem,
             uint64_t set_flags, GpRegIndex _data,

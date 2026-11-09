@@ -1,13 +1,15 @@
 // Directed production-cache tests. This translation unit is opt-in only.
 #include "mem/cache/prefetch/state_fixture.hh"
 #include "params/TPCStateFixture.hh"
+#include "mem/cache/prefetch/p1.hh"
 #include "params/TPCFixtureComponent.hh"
 #include "sim/core.hh"
 namespace gem5::prefetch {
 FixtureComponent::FixtureComponent(const TPCFixtureComponentParams &p)
     : TPCComponent(p), recognized(p.recognize) {}
 StateFixture::StateFixture(const TPCStateFixtureParams &p)
-    : SimObject(p), cache(p.cache), controller(p.controller), component(p.component) {}
+    : SimObject(p), cache(p.cache), dataCache(p.data_cache),
+      controller(p.controller), component(p.component) {}
 void StateFixture::run() {
     unsigned block = cache->getBlockSize();
     auto fill = [&](Addr address, bool secure = false) {
@@ -22,6 +24,7 @@ void StateFixture::run() {
         return InstructionSource{cache, address, blk->instructionState->generation, 7, secure};
     };
     auto original = fill(0x100000);
+    if (dynamic_cast<P1Prefetcher *>(component)) { runP1(original); return; }
     auto read = [&](InstructionSource s, int c) { return cache->readInstructionState(s,c); };
     auto update = [&](InstructionSource s, int c, int from, int to) {
         return cache->updateInstructionState(s,c,from,to);
@@ -129,5 +132,123 @@ void StateFixture::run() {
         panic_if(read(reloaded,3)!=2, "Phase transition cleared classification");
     }
     inform("TPC_STATE_FIXTURE_PASS");
+}
+}
+
+namespace gem5::prefetch {
+void StateFixture::runP1(const InstructionSource &source) {
+    auto *p1 = dynamic_cast<P1Prefetcher *>(component);
+    auto req = std::make_shared<Request>(0x200000, 8, 0,
+        Request::funcRequestorId, 0x400007, 0);
+    req->setPaddr(0x300000);
+    req->setExtension(std::make_shared<LoadIdentity>(1, 0));
+    setInstructionSource(req, source);
+    AccessEvent access;
+    access.level=1; access.size=8; access.address=0x300000;
+    access.request=req; access.primaryMiss=true;
+    controller->cacheAccess(access); // actual T2 ownership plus explicit handoff
+    panic_if(p1->streams.size()!=1, "T2 ownership starved P1 handoff");
+    auto stream=p1->streams[0];
+    auto dependent=source; dependent.offset++;
+    auto producer = [&](uint64_t seq, Addr value, unsigned reg) {
+        RetiredOperation e;
+        e.sequence=seq; e.context=0; e.pc=0x400007; e.source=source;
+        e.request=req; e.load=true; e.width=8; e.value=value;
+        e.destinations={reg};
+        controller->retiredOperation(e);
+    };
+    auto consumer = [&](uint64_t seq, Addr address, unsigned reg) {
+        RetiredOperation e;
+        e.sequence=seq; e.context=0; e.pc=0x400008; e.source=dependent;
+        e.request=std::make_shared<Request>(*req);
+        setInstructionSource(e.request, dependent);
+        e.load=true; e.width=8; e.address=address;
+        e.addressSources={reg}; e.destinations={20};
+        controller->retiredOperation(e);
+    };
+    for (unsigned i=0;i<4;++i) {
+        producer(10+i*2, 0x600000+i*64, 10);
+        consumer(11+i*2, 0x600008+i*64, 10);
+        panic_if(p1->isPointerStream(stream)!=(i==3), "Four observations required");
+    }
+    panic_if(cache->readInstructionState(dependent,2)!=2 ||
+        cache->readInstructionState(dependent,1)!=0 ||
+        cache->readInstructionState(dependent,3)!=0, "P1 state namespace");
+    // Multiple in-flight instances survive independently in architectural registers.
+    producer(30,0x700000,10); producer(31,0x800000,11);
+    consumer(32,0x700008,10); consumer(33,0x800008,11);
+    panic_if(p1->relations[0].confidence.delta!=8 ||
+             p1->relations[0].confidence.samples!=4, "Dynamic producer confusion");
+    // Source2 candidates must not be submitted at completion/packet arrival.
+    panic_if(cache->accounting->value("generated",2), "P1 ignored compute readiness");
+    // Overwrite kills taint even if the new value numerically resembles a pointer.
+    RetiredOperation overwrite; overwrite.context=0; overwrite.destinations={10};
+    controller->retiredOperation(overwrite);
+    auto samples=p1->p1Stats.samples.value();
+    consumer(34,0x700008,10);
+    panic_if(p1->p1Stats.samples.value()!=samples, "Overwrite did not kill dependency");
+    producer(40,0x900000,10); consumer(41,0x8ffff8,10);
+    panic_if(p1->isPointerStream(stream) || p1->relations[0].confidence.samples!=1,
+             "Offset mismatch did not reset confidence");
+    for(unsigned i=0;i<3;++i) { producer(42+i*2,0x900000,10); consumer(43+i*2,0x8ffff8,10); }
+    panic_if(!p1->isPointerStream(stream), "Negative offset failed to retrain");
+    // Two independent exact pointer offsets in one line, with a modeled fill.
+    p1->pending.clear();
+    for(unsigned i=0;i<2;++i) {
+        auto read=std::make_shared<Request>(0x201000+i*8,8,0,
+            Request::funcRequestorId,stream.pc,0);
+        read->setPaddr(0x301000+i*8);
+        p1->onProducerRead({stream,read});
+    }
+    panic_if(p1->pending.size()!=2, "Multiple consumers per line lost");
+    FillEvent fill{1,curTick(),0x301000,std::vector<uint8_t>(64),nullptr};
+    fill.ready=curTick()+1000;
+    uint64_t values[]={0xa00008,0xb00008};
+    for(unsigned k=0;k<2;++k) for(unsigned j=0;j<8;++j)
+        fill.data[k*8+j]=values[k]>>(j*8);
+    fill.secure=true; controller->cacheFill(fill);
+    panic_if(p1->pending[0].returned, "Security domain mixed");
+    fill.secure=false; controller->cacheFill(fill);
+    for(unsigned i=0;i<2;++i)
+        panic_if(!p1->pending[i].returned || p1->pending[i].value!=values[i] ||
+                 p1->pending[i].ready<=fill.ready, "Return offset/readiness incorrect");
+    // Resident-cache path uses the actual cache block and a delayed array read.
+    panic_if(!dataCache, "P1 fixture requires data_cache");
+    auto residentReq=std::make_shared<Request>(0x302000,64,0,Request::funcRequestorId);
+    Packet residentPacket(residentReq,MemCmd::ReadResp); residentPacket.allocate();
+    std::memcpy(residentPacket.getPtr<uint8_t>(),fill.data.data(),64);
+    PacketList writebacks;
+    auto *dataBlock=dataCache->handleFill(&residentPacket,nullptr,writebacks,true);
+    for(auto *packet:writebacks) delete packet;
+    auto residentRead=std::make_shared<Request>(0x202008,8,0,Request::funcRequestorId,stream.pc,0);
+    residentRead->setPaddr(0x302008);
+    p1->onProducerRead({stream,residentRead});
+    panic_if(p1->pending.back().value!=values[1] || !p1->pending.back().returned ||
+             p1->pending.back().ready<=dataBlock->getWhenReady(), "Resident read timing/offset");
+    auto count=p1->pending.size();
+    auto splitRead=std::make_shared<Request>(0x20203c,8,0,Request::funcRequestorId,stream.pc,0);
+    splitRead->setPaddr(0x30203c);
+    p1->onProducerRead({stream,splitRead});
+    panic_if(p1->pending.size()!=count, "Unsupported future split was accepted");
+    // Reuse a full relation table while old slot-zero work is outstanding.
+    auto oldEpoch=p1->relations[0].epoch;
+    for(unsigned i=0;i<p1->relations.size();++i) {
+        dependent.offset=source.offset+2+i;
+        producer(100+i*2,0xc00000+i*64,10);
+        consumer(101+i*2,0xc00008+i*64,10);
+    }
+    panic_if(p1->relations[0].epoch==oldEpoch, "Full relation table did not replace oldest slot");
+    for(const auto &work:p1->pending)
+        panic_if(work.slot==0 && work.epoch==oldEpoch, "Stale relation-slot work survived reuse");
+    // Reusing a T2 slot revokes the old relation, registers and pending work.
+    auto replacement=stream; replacement.version++;
+    p1->onPointerStream(replacement);
+    panic_if(!p1->pending.empty() || p1->isPointerStream(stream), "Stale stream survives replacement");
+    p1->onProducerRead({stream,residentRead});
+    panic_if(!p1->pending.empty(), "Stale producer return recreated work");
+    // Invalidation is delivered synchronously by the real cache.
+    cache->invalidateBlock(cache->tags->findBlock(source.line,false));
+    panic_if(!p1->streams.empty(), "I-cache invalidation retained stream");
+    inform("P1_DIRECTED_PASS");
 }
 }

@@ -614,6 +614,8 @@ BaseCache::recvTimingResp(PacketPtr pkt)
         ppFill->notify(pkt);
         if (!prefetchObservers.empty()) {
             prefetch::FillEvent event{accountingLevel, curTick(), pkt->getAddr(), {}, prefetchRecord(pkt)};
+            event.secure = pkt->isSecure();
+            event.ready = blk->getWhenReady();
             if (pkt->hasData()) {
                 const auto *data = pkt->getConstPtr<uint8_t>();
                 event.data.assign(data, data + pkt->getSize());
