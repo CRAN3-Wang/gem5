@@ -6,6 +6,10 @@
 #include <string.h>
 
 struct node { uint64_t left, value, right, padding[5]; };
+#define MAX_ENTRIES (1u << 16)
+static _Alignas(64) struct node nodes[MAX_ENTRIES];
+static _Alignas(64) unsigned char storage[MAX_ENTRIES * sizeof(uint64_t *) + 128];
+static size_t order[MAX_ENTRIES];
 extern uint64_t visit(uint64_t **, size_t, intptr_t, int, uint64_t *);
 /* Exact symbols permit checking the actual load PCs, independently of compiler
  * scheduling. The independent control overwrites the producer register. */
@@ -27,19 +31,16 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "positive";
     size_t n = argc > 2 ? strtoull(argv[2], 0, 0) : 8192;
     size_t rounds = argc > 3 ? strtoull(argv[3], 0, 0) : 8;
-    if (!n || n > (1u << 24) || !rounds || rounds > 10000 ||
+    if (!n || n > MAX_ENTRIES || !rounds || rounds > 10000 ||
         (strcmp(mode,"positive") && strcmp(mode,"negative") &&
          strcmp(mode,"zero") && strcmp(mode,"varying") && strcmp(mode,"independent") &&
          strcmp(mode,"split") && strcmp(mode,"forwarded"))) {
         fprintf(stderr,"usage: pointer positive|negative|zero|varying|independent|split|forwarded [n] [rounds]\n");
         return 2;
     }
-    struct node *nodes = aligned_alloc(64, n * sizeof(*nodes));
-    unsigned char *storage = aligned_alloc(64, ((n * sizeof(uint64_t *) + 127) / 64) * 64);
-    uint64_t **pointers = storage ?
-        (uint64_t **)(storage + (!strcmp(mode,"split") ? 60 : 0)) : NULL;
-    size_t *order = malloc(n * sizeof(*order));
-    if (!nodes || !storage || !order) return 2;
+    // Static storage avoids host-libc allocator/SE compatibility dependencies.
+    uint64_t **pointers =
+        (uint64_t **)(storage + (!strcmp(mode,"split") ? 60 : 0));
     for (size_t i=0; i<n; ++i) {
         nodes[i].left=3*i+1; nodes[i].value=3*i+2; nodes[i].right=3*i+3;
         order[i]=i;
@@ -66,6 +67,5 @@ int main(int argc, char **argv) {
     }
     printf("pointer mode=%s n=%zu rounds=%zu checksum=%" PRIu64 " expected=%" PRIu64 "\n",
            mode,n,rounds,sum,expected);
-    free(order); free(storage); free(nodes);
     return sum != expected;
 }

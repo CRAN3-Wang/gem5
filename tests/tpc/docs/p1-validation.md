@@ -55,3 +55,11 @@ Reproduce from gem5:
 g++ -std=c++17 -O3 -DNDEBUG -Isrc tests/tpc/timebuf_init.cc -o build/p1-validation/timebuf-init
 build/p1-validation/timebuf-init
 ```
+
+The original heap-backed guest also exposed a host static-libc/SE cleanup
+failure (`double free or corruption (!prev)`, then libc `abort`/HLT) in the
+zero-offset mode. It reproduced with **no prefetcher**, after the TimeBuffer
+fix. The guest now uses bounded, aligned static arrays (up to 65536 elements)
+so the P1 experiment does not depend on that allocator path. This does not
+claim to fix general host-libc compatibility in gem5 SE. The diagnostic
+no-prefetch output is retained in `build/p1-validation/baseline-zero.log`.

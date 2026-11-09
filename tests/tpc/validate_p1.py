@@ -63,8 +63,28 @@ def main():
             assert all(p["delta"] == expected for p in predictions), mode
         if mode in ("split", "forwarded"):
             assert re.search(r"P1_VALUE .*buffered=1", text), f"no buffered producer completion: {mode}"
-        # Shared accounting asserts accepted/outcome conservation at dump time.
-        results[mode] = {"checksum_matches": True, "predictions": len(predictions)}
+        stats = {}
+        for line in (folder / "stats.txt").read_text().splitlines():
+            fields = line.split()
+            if len(fields) > 1:
+                try:
+                    stats[fields[0]] = float(fields[1])
+                except ValueError:
+                    pass
+        value = lambda metric: stats["system.prefetch_accounting." + metric + "::P1"]
+        outcomes = ("timelyUseful", "late", "unusedRemoved", "aborted", "unresolved")
+        assert value("accepted") == sum(value(k) for k in outcomes), mode
+        paths = {name: stats["system.cpu.dcache.prefetcher.components1.p1." + name]
+                 for name in ("residentValues", "deferredValues", "pendingValues", "returns")}
+        if mode == "positive":
+            assert all(paths.values()), paths
+            assert "origin_source=1" in text
+            assert value("accepted") > 0 and value("timelyUseful") > 0
+        if mode in ("varying", "independent"):
+            assert value("accepted") == 0
+        results[mode] = {"checksum_matches": True, "predictions": len(predictions),
+                         "return_paths": paths, "accepted": value("accepted"),
+                         "outcomes": {k: value(k) for k in outcomes}}
     identities = {}
     for path in (args.gem5, binary, ROOT / "tests/tpc/pointer.c"):
         identities[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
