@@ -224,10 +224,20 @@ std::vector<SubmissionResult> TPCController::submit(TPCComponent *component,
     return result;
 }
 void TPCController::retiredOperation(const RetiredOperation &e) {
+    if (e.reset) {
+        // Revoke every P1 consumer before T2 cancellation callbacks can run.
+        // A callback canceling one stream must not release other ready work
+        // during a recovery that invalidates all streams.
+        for (auto *c : components)
+            if (c->source() == 2) c->onRetiredOperation(e, nullptr);
+        for (auto *c : components)
+            if (c->source() != 2) c->onRetiredOperation(e, nullptr);
+        return;
+    }
     // T2 gets committed-load observation first, including cache-bypassing
     // forwarding. It may register a stream here but receives no submission
     // capability. Order does not depend on Python component vector ordering.
-    if (!e.reset) for (auto *c : components) {
+    for (auto *c : components) {
         if (c->source() != 1) continue;
         c->stage = e.load && e.request && validSource(e.source) ?
             TPCComponent::Stage::Retire : TPCComponent::Stage::Observe;
@@ -236,7 +246,6 @@ void TPCController::retiredOperation(const RetiredOperation &e) {
     }
     // CPU commits are an independent framework dispatch, not policy fallthrough.
     for (auto *c : components) {
-        if (e.reset) { c->onRetiredOperation(e, nullptr); continue; }
         if (c->source() != 2) continue;
         if (e.load && e.request && validSource(e.source)) {
             AccessEvent access;
