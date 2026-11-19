@@ -25,6 +25,9 @@ struct FillEvent {
     // only for successful timing read fills; readiness includes modeled fill time.
     Tick serviceStart = 0, readyTick = 0;
     bool readService = false;
+
+    bool secure = false;
+    Tick ready = 0;
 };
 class CacheObserver {
   public:

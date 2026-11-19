@@ -124,6 +124,12 @@ class DynInst : public ExecContext, public RefCounted
     /** The sequence number of the instruction. */
     InstSeqNum seqNum = 0;
     prefetch::InstructionSource instructionSource;
+    // Actual successful completion, including forwarding and assembled splits.
+    RequestPtr p1Request;
+    uint64_t p1Value = 0;
+    unsigned p1Width = 0;
+    bool p1Buffered = false;
+
 
     /** The StaticInst used by this BaseDynInst. */
     const StaticInstPtr staticInst;

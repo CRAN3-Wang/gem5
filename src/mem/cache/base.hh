@@ -1308,6 +1308,18 @@ class BaseCache : public ClockedObject
         memSidePort.schedSendEvent(time);
     }
 
+    // Snapshot only a present readable line. This is a modeled cache-array
+    // observation, never a functional memory access. Consumer waits for ready.
+    bool pointerBytes(Addr addr, bool secure, std::vector<uint8_t> &bytes,
+                      Tick &ready) const {
+        auto *block = tags->findBlock(addr, secure);
+        if (!block || !block->isSet(CacheBlk::ReadableBit)) return false;
+        bytes.assign(block->data, block->data + blkSize);
+        ready = std::max(curTick(), block->getWhenReady()) +
+                clockPeriod() * (lookupLatency + dataLatency);
+        return true;
+    }
+
     bool inCache(Addr addr, bool is_secure) const {
         return tags->findBlock(addr, is_secure);
     }

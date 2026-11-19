@@ -394,7 +394,25 @@ DynInst::completeAcc(PacketPtr pkt)
         }
     }
 
+    p1Request.reset();
+    p1Width = 0;
+    p1Buffered = false;
     fault = staticInst->completeAcc(pkt, this, traceData);
+    if (static_cast<const BaseO3CPUParams &>(cpu->params()).p1_controller &&
+        fault == NoFault && staticInst->p1Load() && !pkt->isError() &&
+        pkt->isRead() && pkt->getSize() > 0 && pkt->getSize() <= 8 &&
+        !pkt->req->isLocalAccess() && !pkt->req->isUncacheable() && !pkt->req->isLLSC()) {
+        // Forwarded and assembled split buffers intentionally use ReadReq,
+        // so command.hasData() would incorrectly discard their valid bytes.
+        p1Request = std::make_shared<Request>(*pkt->req);
+        prefetch::setInstructionSource(p1Request, instructionSource);
+        p1Width = pkt->getSize();
+        p1Buffered = pkt->isRequest();
+        p1Value = 0;
+        for (unsigned i = 0; i < p1Width; ++i)
+            p1Value |= uint64_t(pkt->getConstPtr<uint8_t>()[i]) << (8 * i);
+    }
+
 
     thread->noSquashFromTC = no_squash_from_TC;
 

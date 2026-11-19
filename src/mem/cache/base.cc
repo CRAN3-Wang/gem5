@@ -618,6 +618,9 @@ BaseCache::recvTimingResp(PacketPtr pkt)
             event.readyTick = blk->getWhenReady();
             event.readService = initial_tgt->pkt->isRead() &&
                 !initial_tgt->pkt->req->isUncacheable();
+
+            event.secure = pkt->isSecure();
+            event.ready = blk->getWhenReady();
             if (pkt->hasData()) {
                 const auto *data = pkt->getConstPtr<uint8_t>();
                 event.data.assign(data, data + pkt->getSize());

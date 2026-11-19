@@ -282,6 +282,12 @@ class StaticInst : public RefCounted, public StaticInstFlags
   public:
     virtual ~StaticInst() {};
 
+    // P1 supports ordinary x86 integer loads; other ISAs/forms opt out.
+    virtual bool p1Load() const { return false; }
+    virtual bool p1AddressSource(int) const { return false; }
+    virtual bool p1DataSource(int) const { return true; }
+
+
     virtual Fault execute(ExecContext *xc,
             trace::InstRecord *traceData) const = 0;
 
