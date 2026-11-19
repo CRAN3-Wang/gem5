@@ -1,6 +1,7 @@
 #ifndef __MEM_CACHE_PREFETCH_T2_HH__
 #define __MEM_CACHE_PREFETCH_T2_HH__
 #include <functional>
+#include "arch/generic/mmu.hh"
 #include <map>
 #include <optional>
 #include "mem/cache/prefetch/framework.hh"
@@ -30,6 +31,9 @@ class T2Prefetcher : public TPCComponent {
         unsigned baseDistance = 1;
         std::optional<SubmissionContext> context;
     };
+    struct ProducerTranslation;
+    System *system;
+    unsigned outstandingTranslations = 0;
     const unsigned confirm, reject, provisional, maxDistance, maxPending;
     const unsigned provisionalPerCycle, provisionalQueueLimit;
     const bool trace, serviceLatency;
@@ -47,7 +51,8 @@ class T2Prefetcher : public TPCComponent {
         statistics::Scalar cpuLoads, primaryActivations, samples, confirmed, rejected,
             provisionalRequests, candidates, transported, invalidated, evicted,
             replayAttempts, pendingFull, latencySamples, branches, loopSwitches,
-            arithmeticDrops, unboundLoads, serviceSamples;
+            arithmeticDrops, unboundLoads, serviceSamples, producerTranslations,
+            producerTranslationDrops, producerTranslationFaults;
         explicit Stats(statistics::Group *);
     } t2Stats;
     Entry *find(const Pending &);
@@ -56,12 +61,17 @@ class T2Prefetcher : public TPCComponent {
     bool ready(const Entry &) const;
     void scheduleWork();
     void emitOne();
+    void translateProducer(const Entry &, Addr, bool);
+    void translatedProducer(const PointerStream &, const SubmissionContext &,
+                            const RequestPtr &, bool, bool);
     bool nextAddress(const Entry &, Addr &) const;
     void updateTarget(Entry &, const CPULoadEvent &, const SubmissionContext &);
     void syncState(Entry &);
     T2StreamSnapshot snapshot(const Entry &) const;
     void publish(const char *, const Entry &);
+    PointerStream pointerStream(const Entry &) const;
   protected:
+    void onRetiredOperation(const RetiredOperation &, const SubmissionContext *) override;
     void onObserve(const AccessEvent &) override;
     void onFill(const FillEvent &) override;
     void onTrain(const AccessEvent &) override;

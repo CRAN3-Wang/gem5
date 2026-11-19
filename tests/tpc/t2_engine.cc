@@ -45,6 +45,12 @@ int main() {
     assert(!loop.branch(200,100,true,60) && loop.loopPeriod()==25);
     assert(loop.branch(400,300,true,80) && loop.generation==2 && loop.count==0);
     assert(!loop.recognized() && loop.loopPeriod()==0);
+    T2Loop overlapping(16,16,16);
+    assert(overlapping.branch(0x1887,0x12ed,true,10));
+    assert(overlapping.branch(0x1819,0x16c1,true,20));
+    assert(!overlapping.branch(0x18ce,0x174d,true,30));
+    assert(!overlapping.branch(0x1819,0x16c1,true,40));
+    assert(overlapping.recognized());
     T2Loop bounded(1,0,2);
     assert(bounded.branch(1000,900,true,10));
     assert(!bounded.branch(1000,900,true,20));

@@ -32,6 +32,7 @@ class SubmissionContext {
         : request(std::make_shared<Request>(*event.request)), owner(o) {}
   public:
     SubmissionContext(const SubmissionContext &) = default;
+    const RequestPtr &demandRequest() const { return request; }
 };
 enum class SubmissionResult { Transport, ControllerRejected, Throttled };
 class CacheView {

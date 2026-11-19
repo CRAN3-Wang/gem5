@@ -90,7 +90,11 @@ class T2Loop {
         }
         bool outsidePC = !(incoming > target && incoming < pc);
         bool outsideTarget = !(destination > target && destination < pc);
-        if (!valid || !seen || (outsidePC && outsideTarget)) {
+        bool nested = valid && destination >= target && incoming <= pc;
+        bool widerOverlap = valid && destination < pc && incoming > target &&
+            destination < target && incoming > pc;
+        if (!valid || (outsidePC && outsideTarget) ||
+            (!seen && (nested || widerOverlap))) {
             // Save outgoing values before the Figure 3 switch resets CNT.
             if (valid && count > minSegment && capacity) {
                 if (nonLoops.size() == capacity) nonLoops.erase(nonLoops.begin());

@@ -1,6 +1,8 @@
 #include "mem/cache/prefetch/t2.hh"
 #include <algorithm>
 #include "params/T2Prefetcher.hh"
+#include "sim/system.hh"
+#include "sim/faults.hh"
 namespace gem5::prefetch {
 T2Prefetcher::Stats::Stats(statistics::Group *p) : statistics::Group(p, "t2"),
     ADD_STAT(cpuLoads, statistics::units::Count::get(), "Eligible CPU load attempts"),
@@ -20,9 +22,12 @@ T2Prefetcher::Stats::Stats(statistics::Group *p) : statistics::Group(p, "t2"),
     ADD_STAT(loopSwitches, statistics::units::Count::get(), "Loop register switches"),
     ADD_STAT(arithmeticDrops, statistics::units::Count::get(), "Overflow/address rejections"),
     ADD_STAT(unboundLoads, statistics::units::Count::get(), "Loads before loop recognition"),
-    ADD_STAT(serviceSamples, statistics::units::Count::get(), "Full L1 read-miss service samples") {}
+    ADD_STAT(serviceSamples, statistics::units::Count::get(), "Full L1 read-miss service samples"),
+    ADD_STAT(producerTranslations, statistics::units::Count::get(), "Future pointer translation attempts"),
+    ADD_STAT(producerTranslationDrops, statistics::units::Count::get(), "Future pointer reads skipped before translation"),
+    ADD_STAT(producerTranslationFaults, statistics::units::Count::get(), "Failed or stale pointer translations") {}
 T2Prefetcher::T2Prefetcher(const T2PrefetcherParams &p)
-    : TPCComponent(p), confirm(p.confirm_deltas), reject(p.reject_changes),
+    : TPCComponent(p), system(p.sys), confirm(p.confirm_deltas), reject(p.reject_changes),
       provisional(p.provisional_deltas), maxDistance(p.max_distance),
       maxPending(p.max_pending), provisionalPerCycle(p.provisional_per_cycle),
       provisionalQueueLimit(p.provisional_queue_limit),
@@ -64,8 +69,32 @@ void T2Prefetcher::publish(const char *kind, const Entry &e) {
     const auto s=snapshot(e);
     for (const auto &cb : observers) cb(kind,s);
 }
+PointerStream T2Prefetcher::pointerStream(const Entry &e) const {
+    return {e.id, e.id, e.key.pc, static_cast<MicroPC>(e.key.microPC), e.key.context, e.key.instruction};
+}
+void T2Prefetcher::onRetiredOperation(const RetiredOperation &event, const SubmissionContext *) {
+    if (event.reset) {
+        for (auto &entry : sit) {
+            if (!entry.valid) continue;
+            cancelPointerStream(pointerStream(entry));
+            entry.id = ++nextID;
+            entry.pointer = false;
+            entry.context.reset();
+        }
+        return;
+    }
+    if (!event.load || event.width != 8) return;
+    auto pendingLoad = pending.find({event.context, event.sequence});
+    if (pendingLoad == pending.end()) return;
+    const auto *entry = find(pendingLoad->second);
+    if (entry && entry->run.state == T2DeltaRun::Strided && ready(*entry) &&
+        entry->key.pc == event.pc && entry->key.microPC == event.microPC &&
+        entry->key.instruction == event.source)
+        announcePointerStream(pointerStream(*entry));
+}
 void T2Prefetcher::invalidate(Entry &e, const char *reason) {
     if (!e.valid) return;
+    cancelPointerStream(pointerStream(e));
     e.valid=false; e.context.reset(); t2Stats.invalidated++;
     // Revoke the handle before notifying consumers. Never touch a new residency.
     int state=instructionState(e.key.instruction);
@@ -106,6 +135,8 @@ void T2Prefetcher::onCPULoad(const CPULoadEvent &event, const SubmissionContext 
     if (!p.loopGeneration) { e->run.last=p.address; t2Stats.unboundLoads++; return; }
     if (e->loopGeneration!=p.loopGeneration) {
         // Bind observation after the ROB has recognized its loop.
+        cancelPointerStream(pointerStream(*e));
+        e->id = ++nextID; e->pointer = false;
         e->loopGeneration=p.loopGeneration; e->run=T2DeltaRun{};
         e->run.last=p.address; e->lastPrefValid=false; syncState(*e); return;
     }
@@ -117,6 +148,8 @@ void T2Prefetcher::onCPULoad(const CPULoadEvent &event, const SubmissionContext 
     }
     t2Stats.samples++;
     if (wasDeltaValid && oldDelta!=e->run.delta) {
+        cancelPointerStream(pointerStream(*e));
+        e->id = ++nextID; e->pointer = false;
         e->lastPrefValid=false; e->context.reset();
     }
     if (old!=e->run.state) {
@@ -164,6 +197,7 @@ bool T2Prefetcher::canHandle(const AccessEvent &event) const {
 void T2Prefetcher::updateTarget(Entry &e, const CPULoadEvent &event,
                                const SubmissionContext &context) {
     e.baseDistance=t2Distance(latency.value(),loop.loopPeriod(),margin,maxDistance);
+    e.pointer = pointerDistanceMultiplier(pointerStream(e)) == 2;
     unsigned effective=e.baseDistance*(e.pointer?2:1);
     if (trace) inform("T2_TARGET tick=%llu pc=%#x va=%#x latency=%llu period=%llu margin=%llu distance=%u",
         curTick(),e.key.pc,event.address,latency.value(),loop.loopPeriod(),margin,effective);
@@ -190,6 +224,54 @@ void T2Prefetcher::scheduleWork() {
         schedule(catchup,clockEdge(Cycles(1))); return;
     }
 }
+struct T2Prefetcher::ProducerTranslation : BaseMMU::Translation {
+    T2Prefetcher *owner;
+    PointerStream stream;
+    SubmissionContext context;
+    bool issue;
+    ProducerTranslation(T2Prefetcher *o, const PointerStream &s,
+                        const SubmissionContext &c, bool send)
+        : owner(o), stream(s), context(c), issue(send) {}
+    void markDelayed() override {}
+    void finish(const Fault &fault, const RequestPtr &request,
+                ThreadContext *, BaseMMU::Mode) override {
+        owner->translatedProducer(stream, context, request, fault == NoFault, issue);
+        delete this;
+    }
+};
+void T2Prefetcher::translateProducer(const Entry &e, Addr address, bool issue) {
+    if (!mmu || !e.context || outstandingTranslations >= maxPending ||
+        e.key.context >= system->threads.size() ||
+        (address % cacheView(1).blockSize()) + 8 > cacheView(1).blockSize()) {
+        ++t2Stats.producerTranslationDrops;
+        return;
+    }
+    const auto &demand = e.context->demandRequest();
+    if (demand->isUncacheable()) { ++t2Stats.producerTranslationDrops; return; }
+    auto request = std::make_shared<Request>(address, 8, demand->getFlags(),
+                                             requestorId, e.key.pc, e.key.context);
+    auto *translation = new ProducerTranslation(this, pointerStream(e), *e.context, issue);
+    ++outstandingTranslations;
+    ++t2Stats.producerTranslations;
+    mmu->translateTiming(request, system->threads[e.key.context], translation, BaseMMU::Read);
+}
+void T2Prefetcher::translatedProducer(const PointerStream &stream,
+        const SubmissionContext &context, const RequestPtr &request, bool success, bool issue) {
+    --outstandingTranslations;
+    auto entry = std::find_if(sit.begin(), sit.end(), [&](const Entry &e) {
+        return e.valid && pointerStream(e) == stream && ready(e);
+    });
+    if (!success || request->isUncacheable() || entry == sit.end()) {
+        ++t2Stats.producerTranslationFaults;
+        return;
+    }
+    requestPointerValue({stream, request});
+    if (issue) {
+        auto result = submitCandidates(context, {{request->getPaddr(), 1}});
+        ++t2Stats.candidates;
+        if (result[0] == SubmissionResult::Transport) ++t2Stats.transported;
+    }
+}
 void T2Prefetcher::emitOne() {
     if (provisionalTick!=curTick()) { provisionalTick=curTick(); provisionalUsed=0; }
     for (unsigned k=0;k<sit.size();++k) {
@@ -201,7 +283,9 @@ void T2Prefetcher::emitOne() {
                       queuedCandidates(1)>=provisionalQueueLimit)) continue;
         // Skip zero-value transport: line already covers the actual demand.
         auto line=cacheView(1).blockSize();
-        if (address/line!=e.current/line) {
+        if (e.pointer && !early && e.key.width == 8) {
+            translateProducer(e, address, address/line != e.current/line);
+        } else if (address/line!=e.current/line) {
             auto result=submitCandidates(*e.context,{{address,1,early?0:1,true}});
             t2Stats.candidates++;
             if (result[0]==SubmissionResult::Transport) t2Stats.transported++;
@@ -218,6 +302,7 @@ void T2Prefetcher::onCPUBranch(const CPUBranchEvent &e) {
     t2Stats.branches++;
     if (loop.branch(e.pc,e.target,e.taken,e.tick)) {
         t2Stats.loopSwitches++;
+        if (trace) inform("T2_LOOP pc=%#x target=%#x tick=%llu", e.pc, e.target, curTick());
         for (auto &entry:sit) invalidate(entry,"loop_switch");
         if (catchup.scheduled()) deschedule(catchup);
     }

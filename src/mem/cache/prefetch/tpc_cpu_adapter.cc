@@ -55,7 +55,8 @@ void TPCCPUAdapter::commit(const o3::DynInstPtr &i) {
         e.taken=i->pcState().branching(); controller->cpuBranch(e);
     }
     controller->cpuRetire({i->contextId(),i->seqNum});
-    fetched.erase(i->seqNum);
+    // Older fetches that never reached the ROB can no longer retire.
+    fetched.erase(fetched.begin(), fetched.upper_bound(i->seqNum));
 }
 void TPCCPUAdapter::complete(const std::pair<o3::DynInstPtr,PacketPtr> &p) {
     const auto &i=p.first;

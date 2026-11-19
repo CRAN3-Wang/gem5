@@ -52,14 +52,19 @@ void P1Prefetcher::cancel(const PointerStream &s) {
     process();
 }
 void P1Prefetcher::onPointerStream(const PointerStream &s) {
-    if (active(s)) return;
+    if (active(s)) {
+        // T2 announces the stream for this retiring producer before P1 sees it.
+        auto current = std::find(streams.begin(), streams.end(), s);
+        std::rotate(streams.begin(), current, current + 1);
+        return;
+    }
     // Slot replacement invalidates old consumers before installing new identity.
     auto old = std::find_if(streams.begin(), streams.end(), [&](const auto &x) {
         return x.slot == s.slot && x.context == s.context;
     });
     if (old != streams.end()) { auto copy = *old; cancel(copy); }
-    if (streams.size() == streamLimit) { auto copy = streams.front(); cancel(copy); }
-    streams.push_back(s);
+    if (streams.size() == streamLimit) { auto copy = streams.back(); cancel(copy); }
+    streams.insert(streams.begin(), s);
 }
 bool P1Prefetcher::isPointerStream(const PointerStream &s) const {
     for (const auto &r : relations)
