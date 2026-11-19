@@ -3,6 +3,7 @@
 #include "params/TPCStateFixture.hh"
 #include "mem/cache/prefetch/p1.hh"
 #include "mem/cache/prefetch/p1_fixture.hh"
+#include "mem/cache/prefetch/t2.hh"
 #include "params/TPCFixtureComponent.hh"
 #include "sim/core.hh"
 namespace gem5::prefetch {
@@ -25,6 +26,7 @@ void StateFixture::run() {
         return InstructionSource{cache, address, blk->instructionState->generation, 7, secure};
     };
     auto original = fill(0x100000);
+    if (dynamic_cast<T2Prefetcher *>(producerComponent)) { runConnector(original); return; }
     if (dynamic_cast<P1Prefetcher *>(component)) { runP1(original); return; }
     auto read = [&](InstructionSource s, int c) { return cache->readInstructionState(s,c); };
     auto update = [&](InstructionSource s, int c, int from, int to) {
@@ -208,6 +210,38 @@ void StateFixture::runP1(const InstructionSource &source) {
     for(unsigned i=0;i<3;++i) { producer(42+i*2,0x900000,10); consumer(43+i*2,0x8ffff8,10); }
     panic_if(!p1->isPointerStream(stream), "Negative offset failed to retrain");
     panic_if(t2->multiplier(stream)!=2, "Retraining did not restore multiplier");
+    // A registration alone cannot bind a different dynamic load to this stream.
+    // The production connector must supply the exact retiring sequence.
+    RetiredOperation unmatched;
+    unmatched.sequence=90; unmatched.context=0; unmatched.pc=stream.pc;
+    unmatched.source=source; unmatched.request=req; unmatched.load=true;
+    unmatched.width=8; unmatched.destinations={12};
+    auto capability=p1->relations[0].capability;
+    p1->onPointerStream(stream, 89);
+    p1->onRetiredOperation(unmatched, &*capability);
+    panic_if(p1->registers[12], "Different dynamic load borrowed a registered stream");
+
+    // Two ready streams revoked in a batch must not release each other's work.
+    // Retain a real trained relation/capability while adding a second stream.
+    auto second=stream; second.slot++; second.version++;
+    p1->onPointerStream(second);
+    p1->relations[1]=p1->relations[0];
+    p1->relations[1].stream=second;
+    p1->relations[1].epoch=++p1->epoch;
+    p1->pending.clear();
+    p1->queue(0, 0, false, true, 0x900000, curTick());
+    p1->queue(1, 0, false, true, 0xa00000, curTick());
+    for (auto &work:p1->pending) work.ready=curTick();
+    auto predictions=p1->p1Stats.predictions.value();
+    p1->cancel(stream);
+    panic_if(p1->p1Stats.predictions.value()!=predictions || p1->pending.size()!=1,
+             "Cancel released another stream's ready work");
+    p1->cancel(second);
+    panic_if(!p1->pending.empty() || p1->p1Stats.predictions.value()!=predictions,
+             "Batch cancellation submitted stale work");
+    // Restore the original relation for the return-path tests below.
+    p1->onPointerStream(stream);
+    for(unsigned i=0;i<4;++i) { producer(92+i*2,0x900000,10); consumer(93+i*2,0x8ffff8,10); }
     // Two independent exact pointer offsets in one line, with a modeled fill.
     p1->pending.clear();
     for(unsigned i=0;i<2;++i) {
@@ -266,5 +300,103 @@ void StateFixture::runP1(const InstructionSource &source) {
     cache->invalidateBlock(cache->tags->findBlock(source.line,false));
     panic_if(!p1->streams.empty(), "I-cache invalidation retained stream");
     inform("P1_DIRECTED_PASS");
+}
+
+void StateFixture::runConnector(const InstructionSource &source) {
+    auto *t2=dynamic_cast<T2Prefetcher *>(producerComponent);
+    auto *p1=dynamic_cast<P1Prefetcher *>(component);
+    panic_if(!t2 || !p1, "Connector fixture requires production T2 and P1");
+    CPUBranchEvent branch;
+    branch.pc=0x400100; branch.target=0x400000; branch.taken=true;
+    branch.tick=10; controller->cpuBranch(branch);
+    branch.tick=20; controller->cpuBranch(branch);
+    uint64_t sequence=0;
+    auto issue = [&](Addr ras, Addr address) {
+        CPULoadEvent load;
+        load.sequence=++sequence; load.context=0; load.address=address;
+        load.size=8; load.ras=ras; load.rasValid=true;
+        load.request=std::make_shared<Request>(address, 8, 0,
+            Request::funcRequestorId, 0x400007, 0);
+        load.request->setPaddr(address+0x100000);
+        load.request->setReqInstSeqNum(load.sequence);
+        load.request->setExtension(std::make_shared<LoadIdentity>(load.sequence, 0));
+        setInstructionSource(load.request, source);
+        controller->cpuLoad(load);
+        AccessEvent access;
+        access.request=load.request; access.level=1; access.size=8;
+        access.address=load.request->getPaddr(); access.primaryMiss=true;
+        controller->cacheAccess(access);
+        RetiredOperation retired;
+        retired.sequence=load.sequence; retired.context=0; retired.pc=0x400007;
+        retired.source=source; retired.request=load.request; retired.load=true;
+        retired.width=8; retired.address=address; retired.value=0x800000;
+        retired.destinations={10};
+        return retired;
+    };
+    RetiredOperation a, b;
+    for (unsigned i=0;i<=t2->confirm;++i) {
+        a=issue(0x111, 0x200000+i*8);
+        b=issue(0x222, 0x300000+i*8);
+        // Preserve the last dynamic identities until both streams are trained.
+        if (i<t2->confirm) {
+            controller->cpuRetire({0,a.sequence});
+            controller->cpuRetire({0,b.sequence});
+        }
+    }
+    auto *entryA=t2->find(t2->pending.at({0,a.sequence}));
+    auto *entryB=t2->find(t2->pending.at({0,b.sequence}));
+    panic_if(!entryA || !entryB || entryA==entryB ||
+             !t2->ready(*entryA) || !t2->ready(*entryB), "RAS streams not trained independently");
+    const auto streamA=t2->pointerStream(*entryA);
+    const auto streamB=t2->pointerStream(*entryB);
+    controller->retiredOperation(b);
+    controller->retiredOperation(a);
+    panic_if(!p1->registers[10] || !(p1->registers[10]->stream==streamA),
+             "Retirement selected the other RAS stream");
+    auto unmatched=issue(0x333, 0x400000);
+    controller->retiredOperation(unmatched);
+    panic_if(p1->registers[10], "Untrained RAS borrowed a confirmed PC stream");
+    auto noIssue=a; noIssue.sequence=++sequence;
+    controller->retiredOperation(noIssue);
+    panic_if(p1->registers[10], "Retirement without pending identity borrowed a stream");
+
+    // Simulate a delayed MMU completion across squash and a later valid issue.
+    // Refreshing the context must not revive the old callback's authority.
+    const auto oldContext=*entryA->context;
+    const auto oldGeneration=t2->workGeneration;
+    auto translated=std::make_shared<Request>(0x201000, 8, 0,
+        Request::funcRequestorId, streamA.pc, 0);
+    translated->setPaddr(0x301000);
+    controller->cpuSquash(sequence);
+    a=issue(0x111, a.address+8);
+    panic_if(!entryA->context, "Post-squash issue did not refresh submission context");
+    auto candidates=t2->t2Stats.candidates.value();
+    auto faults=t2->t2Stats.producerTranslationFaults.value();
+    ++t2->outstandingTranslations;
+    t2->translatedProducer(streamA, oldContext, translated, true, true, oldGeneration);
+    panic_if(t2->t2Stats.candidates.value()!=candidates ||
+             t2->t2Stats.producerTranslationFaults.value()!=faults+1,
+             "Squashed translation survived a context refresh");
+
+    // A live completion submits one producer candidate after subscribing.
+    ++t2->outstandingTranslations;
+    t2->translatedProducer(streamA, *entryA->context, translated, true, true,
+                           t2->workGeneration);
+    panic_if(t2->t2Stats.candidates.value()!=candidates+1,
+             "Live translation did not submit the producer candidate");
+    a=issue(0x111, a.address+16);
+    panic_if(entryA->pointerEligible || p1->active(streamA) ||
+             entryA->run.state!=T2DeltaRun::Strided || entryA->run.delta!=8,
+             "Stride deviation did not revoke pointer contract or changed T2 policy");
+    controller->retiredOperation(a);
+    panic_if(p1->registers[10], "Changed-stride stream was reannounced");
+    ++t2->outstandingTranslations;
+    t2->translatedProducer(streamA, oldContext, translated, true, true,
+                           t2->workGeneration);
+    panic_if(t2->t2Stats.candidates.value()!=candidates+1,
+             "Changed-stride translation survived stream revocation");
+    panic_if(!p1->active(streamB), "Independent RAS stream was canceled");
+    if (t2->catchup.scheduled()) t2->deschedule(t2->catchup);
+    inform("TPC_CONNECTOR_DIRECTED_PASS");
 }
 }

@@ -49,13 +49,19 @@ void P1Prefetcher::cancel(const PointerStream &s) {
     streams.erase(std::remove(streams.begin(), streams.end(), s), streams.end());
     for (auto &r : registers) if (r && r->stream == s) r.reset();
     for (auto &r : relations) if (r.valid && r.stream == s) clearRelation(r);
-    process();
+    if (retiringProducer && retiringProducer->first == s) retiringProducer.reset();
+    // Cancellation can be part of a batch. Never release another stream's
+    // ready work while its owner is still revoking the remaining streams.
+    discardStale();
+    scheduleWake();
 }
-void P1Prefetcher::onPointerStream(const PointerStream &s) {
+void P1Prefetcher::onPointerStream(const PointerStream &s,
+                                  std::optional<uint64_t> sequence) {
     if (active(s)) {
         // T2 announces the stream for this retiring producer before P1 sees it.
         auto current = std::find(streams.begin(), streams.end(), s);
         std::rotate(streams.begin(), current, current + 1);
+        if (sequence) retiringProducer = std::make_pair(s, *sequence);
         return;
     }
     // Slot replacement invalidates old consumers before installing new identity.
@@ -65,6 +71,7 @@ void P1Prefetcher::onPointerStream(const PointerStream &s) {
     if (old != streams.end()) { auto copy = *old; cancel(copy); }
     if (streams.size() == streamLimit) { auto copy = streams.back(); cancel(copy); }
     streams.insert(streams.begin(), s);
+    if (sequence) retiringProducer = std::make_pair(s, *sequence);
 }
 bool P1Prefetcher::isPointerStream(const PointerStream &s) const {
     for (const auto &r : relations)
@@ -97,6 +104,8 @@ P1Prefetcher::dependency(const std::vector<unsigned> &inputs) const {
 }
 void P1Prefetcher::onRetiredOperation(const RetiredOperation &e,
                                      const SubmissionContext *capability) {
+    const auto producer = retiringProducer;
+    retiringProducer.reset();
     if (e.reset) {
         for (auto &r : registers) r.reset();
         streams.clear();
@@ -154,18 +163,19 @@ void P1Prefetcher::onRetiredOperation(const RetiredOperation &e,
     }
     std::optional<Token> output;
     if (e.load && capability && e.width == 8) {
-        for (const auto &s : streams) {
-            if (s.pc != e.pc || s.microPC != e.microPC || s.context != e.context ||
-                !(s.source == e.source)) continue;
-            output = Token{s, e.sequence, e.value};
-            ++p1Stats.demandValues;
-            if (trace) inform("P1_VALUE producer=%#x seq=%llu value=%#x buffered=%d tick=%llu",
-                e.pc, e.sequence, e.value, e.buffered, curTick());
-            for (size_t i = 0; i < relations.size(); ++i)
-                if (relations[i].valid && relations[i].stream == s &&
-                    relations[i].confidence.samples >= threshold)
-                    queue(i, 0, false, true, e.value, curTick());
-            break;
+        if (producer && producer->second == e.sequence) {
+            const auto &s = producer->first;
+            if (s.pc == e.pc && s.microPC == e.microPC && s.context == e.context &&
+                s.source == e.source && active(s)) {
+                output = Token{s, e.sequence, e.value};
+                ++p1Stats.demandValues;
+                if (trace) inform("P1_VALUE producer=%#x seq=%llu stream=%llu version=%llu value=%#x buffered=%d tick=%llu",
+                    e.pc, e.sequence, s.slot, s.version, e.value, e.buffered, curTick());
+                for (size_t i = 0; i < relations.size(); ++i)
+                    if (relations[i].valid && relations[i].stream == s &&
+                        relations[i].confidence.samples >= threshold)
+                        queue(i, 0, false, true, e.value, curTick());
+            }
         }
     } else if (e.propagate) output = dep;
     // Every integer write overwrites provenance, including unsupported loads.
@@ -175,6 +185,7 @@ void P1Prefetcher::onRetiredOperation(const RetiredOperation &e,
 }
 void P1Prefetcher::queue(size_t slot, Addr physical, bool secure,
                          bool returned, Addr value, Tick ready) {
+    discardStale();
     if (pending.size() >= pendingLimit) { ++p1Stats.overflow; return; }
     pending.push_back({slot, relations[slot].epoch, physical, value, secure,
         returned, ready + clockPeriod() * computationLatency, curTick() + timeout});
@@ -230,12 +241,22 @@ void P1Prefetcher::scheduleWake() {
     if (wake.scheduled()) deschedule(wake);
     if (next != MaxTick) schedule(wake, std::max(curTick() + 1, next));
 }
+bool P1Prefetcher::stale(const Pending &p) const {
+    const auto &r = relations[p.slot];
+    return !r.valid || r.epoch != p.epoch || !active(r.stream) ||
+        instructionState(r.dependent) < 0 || curTick() >= p.expires;
+}
+void P1Prefetcher::discardStale() {
+    pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const Pending &p) {
+        if (!stale(p)) return false;
+        ++p1Stats.canceled;
+        return true;
+    }), pending.end());
+}
 void P1Prefetcher::process() {
     for (auto it = pending.begin(); it != pending.end();) {
         auto &r = relations[it->slot];
-        bool stale = !r.valid || r.epoch != it->epoch || !active(r.stream) ||
-            instructionState(r.dependent) < 0 || curTick() >= it->expires;
-        if (stale) { ++p1Stats.canceled; it = pending.erase(it); continue; }
+        if (stale(*it)) { ++p1Stats.canceled; it = pending.erase(it); continue; }
         if (!it->returned || curTick() < it->ready) { ++it; continue; }
         Addr target;
         if (r.capability && pointerTarget(it->value, r.confidence.delta, target)) {

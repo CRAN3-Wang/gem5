@@ -74,6 +74,7 @@ PointerStream T2Prefetcher::pointerStream(const Entry &e) const {
 }
 void T2Prefetcher::onRetiredOperation(const RetiredOperation &event, const SubmissionContext *) {
     if (event.reset) {
+        ++workGeneration;
         for (auto &entry : sit) {
             if (!entry.valid) continue;
             cancelPointerStream(pointerStream(entry));
@@ -85,12 +86,25 @@ void T2Prefetcher::onRetiredOperation(const RetiredOperation &event, const Submi
     }
     if (!event.load || event.width != 8) return;
     auto pendingLoad = pending.find({event.context, event.sequence});
-    if (pendingLoad == pending.end()) return;
+    if (pendingLoad == pending.end()) {
+        if (trace) inform("T2_RETIRE seq=%llu context=%d pc=%#x pending=0 matched=0",
+            event.sequence, event.context, event.pc);
+        return;
+    }
     const auto *entry = find(pendingLoad->second);
-    if (entry && entry->run.state == T2DeltaRun::Strided && ready(*entry) &&
+    bool matched = entry && entry->pointerEligible &&
+        entry->run.state == T2DeltaRun::Strided && ready(*entry) &&
+        pendingLoad->second.loopGeneration == entry->loopGeneration &&
+        pendingLoad->second.width == event.width &&
+        pendingLoad->second.address == event.address &&
         entry->key.pc == event.pc && entry->key.microPC == event.microPC &&
-        entry->key.instruction == event.source)
-        announcePointerStream(pointerStream(*entry));
+        entry->key.instruction == event.source;
+    if (trace) inform("T2_RETIRE seq=%llu context=%d pc=%#x upc=%u ras=%#x ras_valid=%d pending=1 matched=%d stream=%llu tick=%llu",
+        event.sequence, event.context, event.pc, event.microPC,
+        pendingLoad->second.ras, pendingLoad->second.rasValid, matched,
+        entry ? entry->id : 0, curTick());
+    if (matched)
+        announcePointerStream(pointerStream(*entry), event.sequence);
 }
 void T2Prefetcher::invalidate(Entry &e, const char *reason) {
     if (!e.valid) return;
@@ -137,12 +151,26 @@ void T2Prefetcher::onCPULoad(const CPULoadEvent &event, const SubmissionContext 
         // Bind observation after the ROB has recognized its loop.
         cancelPointerStream(pointerStream(*e));
         e->id = ++nextID; e->pointer = false;
+        e->pointerEligible = true;
         e->loopGeneration=p.loopGeneration; e->run=T2DeltaRun{};
-        e->run.last=p.address; e->lastPrefValid=false; syncState(*e); return;
+        e->run.last=p.address; e->lastPrefValid=false; e->context.reset();
+        syncState(*e); return;
     }
     auto old=e->run.state;
     auto oldDelta=e->run.delta;
     bool wasDeltaValid=e->run.deltaValid;
+    int64_t observedDelta;
+    if (old == T2DeltaRun::Strided && e->pointerEligible &&
+        (!t2Delta(p.address, e->run.last, observedDelta) || observedDelta != oldDelta)) {
+        // T2 intentionally freezes classification after confirmation. Keep that
+        // policy, but revoke the pointer contract when this is no longer the
+        // confirmed producer sequence. A new SIT/loop residency may retrain it.
+        if (trace) inform("T2_POINTER_REVOKE seq=%llu pc=%#x ras=%#x stream=%llu previous=%#x address=%#x stride=%lld tick=%llu",
+            event.sequence, e->key.pc, e->key.ras, e->id, e->run.last,
+            p.address, oldDelta, curTick());
+        cancelPointerStream(pointerStream(*e));
+        e->id = ++nextID; e->pointer = false; e->pointerEligible = false;
+    }
     if (!e->run.sample(p.address,confirm,reject)) {
         t2Stats.arithmeticDrops++; invalidate(*e,"overflow"); return;
     }
@@ -197,7 +225,12 @@ bool T2Prefetcher::canHandle(const AccessEvent &event) const {
 void T2Prefetcher::updateTarget(Entry &e, const CPULoadEvent &event,
                                const SubmissionContext &context) {
     e.baseDistance=t2Distance(latency.value(),loop.loopPeriod(),margin,maxDistance);
-    e.pointer = pointerDistanceMultiplier(pointerStream(e)) == 2;
+    bool pointer = e.pointerEligible && pointerDistanceMultiplier(pointerStream(e)) == 2;
+    if (trace && e.pointer != pointer)
+        inform("T2_FEEDBACK seq=%llu pc=%#x ras=%#x stream=%llu pointer=%d base_distance=%u effective_distance=%u tick=%llu",
+            event.sequence, e.key.pc, e.key.ras, e.id, pointer, e.baseDistance,
+            e.baseDistance * (pointer ? 2 : 1), curTick());
+    e.pointer = pointer;
     unsigned effective=e.baseDistance*(e.pointer?2:1);
     if (trace) inform("T2_TARGET tick=%llu pc=%#x va=%#x latency=%llu period=%llu margin=%llu distance=%u",
         curTick(),e.key.pc,event.address,latency.value(),loop.loopPeriod(),margin,effective);
@@ -229,13 +262,15 @@ struct T2Prefetcher::ProducerTranslation : BaseMMU::Translation {
     PointerStream stream;
     SubmissionContext context;
     bool issue;
+    uint64_t generation;
     ProducerTranslation(T2Prefetcher *o, const PointerStream &s,
                         const SubmissionContext &c, bool send)
-        : owner(o), stream(s), context(c), issue(send) {}
+        : owner(o), stream(s), context(c), issue(send), generation(o->workGeneration) {}
     void markDelayed() override {}
     void finish(const Fault &fault, const RequestPtr &request,
                 ThreadContext *, BaseMMU::Mode) override {
-        owner->translatedProducer(stream, context, request, fault == NoFault, issue);
+        owner->translatedProducer(stream, context, request, fault == NoFault, issue,
+                                  generation);
         delete this;
     }
 };
@@ -256,12 +291,14 @@ void T2Prefetcher::translateProducer(const Entry &e, Addr address, bool issue) {
     mmu->translateTiming(request, system->threads[e.key.context], translation, BaseMMU::Read);
 }
 void T2Prefetcher::translatedProducer(const PointerStream &stream,
-        const SubmissionContext &context, const RequestPtr &request, bool success, bool issue) {
+        const SubmissionContext &context, const RequestPtr &request, bool success,
+        bool issue, uint64_t generation) {
     --outstandingTranslations;
     auto entry = std::find_if(sit.begin(), sit.end(), [&](const Entry &e) {
-        return e.valid && pointerStream(e) == stream && ready(e);
+        return e.valid && e.context && pointerStream(e) == stream && ready(e);
     });
-    if (!success || request->isUncacheable() || entry == sit.end()) {
+    if (!success || !request->hasPaddr() || request->isUncacheable() ||
+        generation != workGeneration || entry == sit.end()) {
         ++t2Stats.producerTranslationFaults;
         return;
     }
@@ -323,6 +360,7 @@ void T2Prefetcher::onCPUComplete(const CPUCompleteEvent &e) {
 }
 void T2Prefetcher::onCPURetire(const CPUIdentity &e) { pending.erase({e.context,e.sequence}); }
 void T2Prefetcher::onCPUSquash(InstSeqNum boundary) {
+    ++workGeneration;
     for (auto it=pending.begin();it!=pending.end();)
         if (it->first.second>boundary) it=pending.erase(it); else ++it;
     // Pending issue-derived work is conservative: a squash cancels all catch-up,
@@ -344,7 +382,8 @@ std::optional<T2StreamSnapshot> T2Prefetcher::lookupStream(ContextID context, Ad
 }
 bool T2Prefetcher::setPointerSource(T2StreamHandle h, bool pointer) {
     for (auto &e:sit) if (e.valid && e.id==h.id && e.id==h.generation) {
-        if (instructionState(e.key.instruction)<0 || e.run.state!=T2DeltaRun::Strided) return false;
+        if (instructionState(e.key.instruction)<0 || e.run.state!=T2DeltaRun::Strided ||
+            (pointer && !e.pointerEligible)) return false;
         if (e.pointer!=pointer) { e.pointer=pointer; publish("updated",e); }
         return true;
     }

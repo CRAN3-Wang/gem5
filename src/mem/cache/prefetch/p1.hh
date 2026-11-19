@@ -39,6 +39,8 @@ class P1Prefetcher : public TPCComponent {
     ContextID currentContext = InvalidContextID;
     std::array<std::optional<Token>, 256> registers;
     std::vector<PointerStream> streams;
+    // Only an exact T2 issue/retire join may seed architectural provenance.
+    std::optional<std::pair<PointerStream, uint64_t>> retiringProducer;
     std::vector<Relation> relations;
     std::vector<Pending> pending;
     EventFunctionWrapper wake;
@@ -52,6 +54,8 @@ class P1Prefetcher : public TPCComponent {
     void clearRelation(Relation &);
     void updateClassification(const InstructionSource &);
     void scheduleWake();
+    bool stale(const Pending &) const;
+    void discardStale();
     void process();
     void queue(size_t, Addr, bool, bool, Addr, Tick);
     void consume(const FillEvent &);
@@ -60,7 +64,8 @@ class P1Prefetcher : public TPCComponent {
     bool canHandle(const AccessEvent &) const override;
     void onPredict(const AccessEvent &, const SubmissionContext &) override {}
     void onRetiredOperation(const RetiredOperation &, const SubmissionContext *) override;
-    void onPointerStream(const PointerStream &) override;
+    void onPointerStream(const PointerStream &,
+                         std::optional<uint64_t> = std::nullopt) override;
     void onProducerRead(const ProducerRead &) override;
     void onPointerStreamCanceled(const PointerStream &s) override { cancel(s); }
     bool isPointerStream(const PointerStream &) const override;

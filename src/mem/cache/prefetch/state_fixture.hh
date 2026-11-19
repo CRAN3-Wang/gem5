@@ -31,6 +31,7 @@ class StateFixture : public SimObject {
     explicit StateFixture(const TPCStateFixtureParams &);
     void run();
     void runP1(const InstructionSource &);
+    void runConnector(const InstructionSource &);
 };
 }}
 #endif
