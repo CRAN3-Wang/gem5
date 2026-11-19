@@ -10,6 +10,7 @@ namespace prefetch {
 class C1Prefetcher : public TPCComponent {
     friend class StateFixture;
     enum State { Unknown, Monitoring, NonDense, Dense };
+    const bool trace;
     const unsigned regionLines;
     C1Tables tables;
     struct Stats : statistics::Group {

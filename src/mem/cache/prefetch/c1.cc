@@ -16,7 +16,7 @@ C1Prefetcher::Stats::Stats(statistics::Group *parent)
       ADD_STAT(invalidatedTraining, statistics::units::Count::get(), "Training canceled by I-cache invalidation"),
       ADD_STAT(regionPredictions, statistics::units::Count::get(), "Whole-region prediction calls") {}
 C1Prefetcher::C1Prefetcher(const C1PrefetcherParams &p)
-    : TPCComponent(p), regionLines(p.region_lines),
+    : TPCComponent(p), trace(p.trace), regionLines(p.region_lines),
       tables(p.im_entries, p.rm_entries, p.region_lines, p.dense_lines, p.training_regions), c1Stats(this)
 {
     fatal_if(source() != 3 || !regionLines || regionLines > 64 ||
@@ -65,6 +65,12 @@ void C1Prefetcher::onPredict(const AccessEvent &e, const SubmissionContext &cont
     for (unsigned k = 0; k < regionLines; ++k) {
         Addr address = start + k * block;
         if (address != (e.address & ~(Addr(block) - 1))) candidates.push_back({address, 2});
+    }
+    if (trace) {
+        for (const auto &candidate : candidates)
+            inform("C1_CANDIDATE pc=%#x demand=%#x pa=%#x target=%d generation=%llu",
+                   e.request->getPC(), e.address, candidate.address, candidate.target,
+                   instructionSource(e.request).generation);
     }
     c1Stats.regionPredictions++;
     submitCandidates(context, candidates);

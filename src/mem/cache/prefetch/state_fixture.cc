@@ -242,6 +242,27 @@ void StateFixture::runP1(const InstructionSource &source) {
     // Restore the original relation for the return-path tests below.
     p1->onPointerStream(stream);
     for(unsigned i=0;i<4;++i) { producer(92+i*2,0x900000,10); consumer(93+i*2,0x8ffff8,10); }
+    // Saturate the bounded P1 queue, expire all entries and admit new work.
+    p1->pending.clear();
+    auto overflow = p1->p1Stats.overflow.value();
+    auto canceled = p1->p1Stats.canceled.value();
+    for (unsigned i = 0; i <= p1->pendingLimit; ++i)
+        p1->queue(0, 0, false, false, 0, curTick());
+    panic_if(p1->pending.size() != p1->pendingLimit ||
+             p1->p1Stats.overflow.value() != overflow + 1, "Bounded queue overflow");
+    for (auto &work : p1->pending) work.expires = curTick();
+    auto generated = cache->accounting->value("generated", 2);
+    p1->process();
+    panic_if(!p1->pending.empty() ||
+             p1->p1Stats.canceled.value() != canceled + p1->pendingLimit ||
+             cache->accounting->value("generated", 2) != generated, "Expired queue work survived");
+    p1->queue(0, 0, false, true, 0x900000, curTick());
+    p1->pending.front().ready = curTick();
+    p1->process();
+    p1->process();
+    panic_if(!p1->pending.empty() || cache->accounting->value("generated", 2) != generated + 1,
+             "Queue recovery must submit exactly once");
+    inform("P1_PRESSURE_RECOVERY_PASS");
     // Two independent exact pointer offsets in one line, with a modeled fill.
     p1->pending.clear();
     for(unsigned i=0;i<2;++i) {
@@ -377,6 +398,16 @@ void StateFixture::runConnector(const InstructionSource &source) {
     panic_if(t2->t2Stats.candidates.value()!=candidates ||
              t2->t2Stats.producerTranslationFaults.value()!=faults+1,
              "Squashed translation survived a context refresh");
+
+    // A failed page walk can complete without a physical address.
+    auto unmapped = std::make_shared<Request>(0x210000, 8, 0,
+        Request::funcRequestorId, streamA.pc, 0);
+    ++t2->outstandingTranslations;
+    t2->translatedProducer(streamA, *entryA->context, unmapped, false, true,
+                           t2->workGeneration);
+    panic_if(t2->t2Stats.candidates.value()!=candidates ||
+             t2->t2Stats.producerTranslationFaults.value()!=faults+2 ||
+             t2->outstandingTranslations, "Failed translation leaked work");
 
     // A live completion submits one producer candidate after subscribing.
     ++t2->outstandingTranslations;

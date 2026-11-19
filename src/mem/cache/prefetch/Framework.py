@@ -74,6 +74,7 @@ class C1Prefetcher(TPCComponent):
     cxx_class = "gem5::prefetch::C1Prefetcher"
     cxx_header = "mem/cache/prefetch/c1.hh"
     accounting_source = 3
+    trace = Param.Bool(False, "Log spatial candidate addresses")
     region_lines = Param.Unsigned(16, "Cache lines per region")
     rm_entries = Param.Unsigned(16, "LRU region monitor entries")
     im_entries = Param.Unsigned(16, "Non-replacing instruction monitor entries")

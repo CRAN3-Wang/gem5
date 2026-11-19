@@ -99,8 +99,8 @@ void T2Prefetcher::onRetiredOperation(const RetiredOperation &event, const Submi
         pendingLoad->second.address == event.address &&
         entry->key.pc == event.pc && entry->key.microPC == event.microPC &&
         entry->key.instruction == event.source;
-    if (trace) inform("T2_RETIRE seq=%llu context=%d pc=%#x upc=%u ras=%#x ras_valid=%d pending=1 matched=%d stream=%llu tick=%llu",
-        event.sequence, event.context, event.pc, event.microPC,
+    if (trace) inform("T2_RETIRE seq=%llu context=%d pc=%#x upc=%u va=%#x ras=%#x ras_valid=%d pending=1 matched=%d stream=%llu tick=%llu",
+        event.sequence, event.context, event.pc, event.microPC, event.address,
         pendingLoad->second.ras, pendingLoad->second.rasValid, matched,
         entry ? entry->id : 0, curTick());
     if (matched)
@@ -275,9 +275,15 @@ struct T2Prefetcher::ProducerTranslation : BaseMMU::Translation {
     }
 };
 void T2Prefetcher::translateProducer(const Entry &e, Addr address, bool issue) {
+    const auto block = cacheView(1).blockSize();
+    if (address % block + 8 > block) {
+        if (trace) inform("T2_PRODUCER_SKIP pc=%#x stream=%llu va=%#x width=8 reason=cross_line",
+                          e.key.pc, e.id, address);
+        ++t2Stats.producerTranslationDrops;
+        return;
+    }
     if (!mmu || !e.context || outstandingTranslations >= maxPending ||
-        e.key.context >= system->threads.size() ||
-        (address % cacheView(1).blockSize()) + 8 > cacheView(1).blockSize()) {
+        e.key.context >= system->threads.size()) {
         ++t2Stats.producerTranslationDrops;
         return;
     }
