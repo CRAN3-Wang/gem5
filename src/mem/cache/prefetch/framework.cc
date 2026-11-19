@@ -264,13 +264,14 @@ void TPCController::retiredOperation(const RetiredOperation &e) {
         }
     }
 }
-void TPCComponent::announcePointerStream(const PointerStream &s) {
+void TPCComponent::announcePointerStream(const PointerStream &s,
+                                        std::optional<uint64_t> sequence) {
     fatal_if(source() != 1 || !controller ||
              (stage != Stage::Predict && stage != Stage::Retire),
              "Only authorized T2 prediction/retirement may announce streams");
     if (!s.version || !controller->validSource(s.source)) return;
     for (auto *c : controller->components)
-        if (c->source() == 2) c->onPointerStream(s);
+        if (c->source() == 2) c->onPointerStream(s, sequence);
 }
 void TPCComponent::requestPointerValue(const ProducerRead &r) {
     fatal_if(source() != 1 || !controller ||

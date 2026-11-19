@@ -12,7 +12,7 @@ class P1ProducerFixture : public TPCComponent {
                             const SubmissionContext *) override {
         if (e.load && e.pc == producerPC && instructionState(e.source) >= 0)
             announcePointerStream({0, e.source.generation, e.pc, e.microPC,
-                                   e.context, e.source});
+                                   e.context, e.source}, e.sequence);
     }
     bool canHandle(const AccessEvent &e) const override {
         return !e.write && e.request->getPC() == producerPC;

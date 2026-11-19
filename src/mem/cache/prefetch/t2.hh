@@ -12,6 +12,7 @@ namespace gem5 {
 struct T2PrefetcherParams;
 namespace prefetch {
 class T2Prefetcher : public TPCComponent {
+    friend class StateFixture;
     struct Pending {
         InstructionSource instruction;
         ContextID context = 0;
@@ -24,6 +25,7 @@ class T2Prefetcher : public TPCComponent {
     using DynamicKey = std::pair<ContextID, InstSeqNum>;
     struct Entry {
         bool valid = false, pointer = false, lastPrefValid = false;
+        bool pointerEligible = true;
         uint64_t id = 0, lastUse = 0, loopGeneration = 0;
         Pending key;
         T2DeltaRun run;
@@ -34,6 +36,7 @@ class T2Prefetcher : public TPCComponent {
     struct ProducerTranslation;
     System *system;
     unsigned outstandingTranslations = 0;
+    uint64_t workGeneration = 0;
     const unsigned confirm, reject, provisional, maxDistance, maxPending;
     const unsigned provisionalPerCycle, provisionalQueueLimit;
     const bool trace, serviceLatency;
@@ -63,7 +66,7 @@ class T2Prefetcher : public TPCComponent {
     void emitOne();
     void translateProducer(const Entry &, Addr, bool);
     void translatedProducer(const PointerStream &, const SubmissionContext &,
-                            const RequestPtr &, bool, bool);
+                            const RequestPtr &, bool, bool, uint64_t);
     bool nextAddress(const Entry &, Addr &) const;
     void updateTarget(Entry &, const CPULoadEvent &, const SubmissionContext &);
     void syncState(Entry &);

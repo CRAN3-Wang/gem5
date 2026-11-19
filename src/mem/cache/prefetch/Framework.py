@@ -36,15 +36,24 @@ class TPCController(BasePrefetcher):
     def bindHierarchy(self, caches, instruction_cache=None):
         self._hierarchy = list(caches)
         self._instruction_cache = instruction_cache
-        # The existing project hierarchy hook supplies the CPU-owned I-cache.
-        # Bind retirement here so parent-project configuration need not change.
-        if instruction_cache is not None and any(
-            int(c.accounting_source) == 2 for c in self.components
-        ):
+        sources = {int(c.accounting_source) for c in self.components}
+        # T2 needs issue/complete/branch facts as well as retirement ordering;
+        # P1 needs committed register provenance. Bind both at the same hook.
+        if sources & {1, 2}:
+            if instruction_cache is None:
+                raise ValueError("T2/P1 require a CPU-owned instruction cache")
             cpu = instruction_cache.get_parent()
             if cpu is None or not hasattr(cpu, "p1_controller"):
-                raise ValueError("P1 requires an O3 CPU-owned instruction cache")
+                raise ValueError("T2/P1 require an O3 CPU-owned instruction cache")
             cpu.p1_controller = self
+            if 1 in sources:
+                if hasattr(cpu, "tpc_adapter"):
+                    if cpu.tpc_adapter.controller is not self:
+                        raise ValueError("CPU already has another TPC controller")
+                else:
+                    cpu.tpc_adapter = TPCCPUAdapter(
+                        cpu=cpu, controller=self, branch_predictor=cpu.branchPred
+                    )
             # T2 can translate its exact producer Request asynchronously, then
             # hand it to P1 and submit the PA with its saved T2 capability.
             for component in self.components:

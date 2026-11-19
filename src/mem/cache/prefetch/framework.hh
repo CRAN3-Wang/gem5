@@ -2,6 +2,7 @@
 #ifndef __MEM_PREFETCH_FRAMEWORK_HH__
 #define __MEM_PREFETCH_FRAMEWORK_HH__
 #include <array>
+#include <optional>
 #include "mem/cache/prefetch/p1_events.hh"
 #include "mem/cache/prefetch/queued.hh"
 #include "mem/cache/base.hh"
@@ -70,14 +71,16 @@ class TPCComponent : public Base {
     virtual void onCPUSquash(InstSeqNum) {}
     virtual void onInstructionInvalidated(const InstructionSource &) {}
     virtual void onRetiredOperation(const RetiredOperation &, const SubmissionContext *) {}
-    virtual void onPointerStream(const PointerStream &) {}
+    virtual void onPointerStream(const PointerStream &,
+                                 std::optional<uint64_t> = std::nullopt) {}
     virtual void onProducerRead(const ProducerRead &) {}
     virtual void onPointerStreamCanceled(const PointerStream &) {}
     virtual bool isPointerStream(const PointerStream &) const { return false; }
     // T2 registers streams during authorized prediction or committed-load
     // observation. Deferred translation
     // callbacks may hand off values for an already registered live stream.
-    void announcePointerStream(const PointerStream &);
+    void announcePointerStream(const PointerStream &,
+                               std::optional<uint64_t> = std::nullopt);
     void requestPointerValue(const ProducerRead &);
     void cancelPointerStream(const PointerStream &);
     unsigned pointerDistanceMultiplier(const PointerStream &) const;
